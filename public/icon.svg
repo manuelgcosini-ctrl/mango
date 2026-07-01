@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="mangoBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="55%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <path d="M 190 150 C 140 190 118 262 150 332 C 182 402 262 424 322 382 C 382 340 402 258 360 188 C 328 136 248 118 190 150 Z" fill="url(#mangoBody)"/>
+  <path d="M 188 152 C 206 118 250 100 288 112" stroke="#16a34a" stroke-width="20" fill="none" stroke-linecap="round"/>
+  <ellipse cx="240" cy="230" rx="12" ry="20" fill="#fff7ed" opacity=".35" transform="rotate(-25 240 230)"/>
+</svg>

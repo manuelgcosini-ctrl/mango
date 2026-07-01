@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mango</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="theme-color" content="#0f172a">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="brand-icon">🥭</span>
+    <div>
+      <h1>Mango</h1>
+      <div class="tagline">plata, sin drama</div>
+    </div>
+  </div>
+  <button id="configBtn" title="Configuración">⚙️</button>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab-btn active" data-view="cargar">Cargar</button>
+    <button class="tab-btn" data-view="movimientos">Movimientos</button>
+    <button class="tab-btn" data-view="activos">Activos</button>
+  </div>
+
+  <section id="view-cargar" class="view active">
+    <div class="card">
+      <div class="tipo-toggle" id="tipoToggle">
+        <button class="tipo-btn active" data-tipo="Gasto">💸 Gasto</button>
+        <button class="tipo-btn" data-tipo="Ingreso">💰 Ingreso</button>
+        <button class="tipo-btn" data-tipo="Transferencia">🔁 Transferencia</button>
+      </div>
+
+      <label>Fecha</label>
+      <div class="chip-row" id="fechaChips">
+        <button type="button" class="chip active" data-dias="0">Hoy</button>
+        <button type="button" class="chip" data-dias="1">Ayer</button>
+        <button type="button" class="chip" data-dias="2">Antes de ayer</button>
+        <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
+      </div>
+      <input type="date" id="fecha" class="fecha-custom oculto">
+
+      <label id="labelCuenta">Cuenta</label>
+      <div class="row">
+        <div>
+          <select id="moneda">
+            <option value="AUD">AUD</option>
+            <option value="EUR">EUR</option>
+            <option value="ARS">ARS</option>
+            <option value="USD">USD</option>
+          </select>
+        </div>
+        <div class="chip-row" id="medioChips"></div>
+      </div>
+
+      <div id="bloqueTransferencia" class="oculto">
+        <label>Cuenta destino</label>
+        <div class="row">
+          <div>
+            <select id="monedaDestino">
+              <option value="AUD">AUD</option>
+              <option value="EUR">EUR</option>
+              <option value="ARS">ARS</option>
+              <option value="USD">USD</option>
+            </select>
+          </div>
+          <div class="chip-row" id="medioChipsDestino"></div>
+        </div>
+        <label for="montoRecibido">Monto recibido</label>
+        <input type="text" id="montoRecibido" inputmode="decimal" placeholder="0">
+        <div class="tasa-hint" id="tasaHint"></div>
+      </div>
+
+      <label for="monto">Monto</label>
+      <input type="text" id="monto" inputmode="decimal" placeholder="0 (podés escribir 45+12.50)">
+      <div class="calc-hint" id="calcHint"></div>
+
+      <div id="bloqueCategoria">
+        <label>Categoría</label>
+        <div class="chip-grid" id="categoriaChips"></div>
+        <div class="chip-row" id="subcategoriaChips"></div>
+      </div>
+
+      <label for="nota">Nota (opcional)</label>
+      <input type="text" id="nota" placeholder="Ej: supermercado Coles">
+
+      <button class="primary" id="guardarBtn">Guardar</button>
+    </div>
+
+    <div class="card ultimos-card">
+      <div class="card-title">Últimos movimientos</div>
+      <div id="ultimosMovimientos"></div>
+    </div>
+  </section>
+
+  <section id="view-movimientos" class="view">
+    <div class="filtros">
+      <select id="filtroTipo">
+        <option value="">Todos los tipos</option>
+        <option value="Gasto">💸 Gastos</option>
+        <option value="Ingreso">💰 Ingresos</option>
+        <option value="Transferencia">🔁 Transferencias</option>
+      </select>
+      <select id="filtroMoneda">
+        <option value="">Todas las monedas</option>
+        <option value="AUD">AUD</option>
+        <option value="EUR">EUR</option>
+        <option value="ARS">ARS</option>
+        <option value="USD">USD</option>
+      </select>
+      <select id="filtroMes"></select>
+    </div>
+
+    <div id="totales" class="totales"></div>
+
+    <div id="listaMovimientos"></div>
+  </section>
+
+  <section id="view-activos" class="view">
+    <div class="card">
+      <div class="card-title">Saldo estimado por cuenta</div>
+      <div id="saldosCuentas"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Gasto por categoría (este mes)</div>
+      <div id="gastoPorCategoria"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Patrimonio invertido (aprox.)</div>
+      <div class="row">
+        <input type="text" id="patrimonioInput" inputmode="decimal" placeholder="0">
+        <button id="guardarPatrimonioBtn" class="secondary">Guardar</button>
+      </div>
+      <div class="muted-note">Valor manual: lo actualizás vos cuando te acordás, no está conectado a nada.</div>
+    </div>
+  </section>
+</main>
+
+<div id="configOverlay" class="overlay">
+  <div class="sheet">
+    <h2>Configuración</h2>
+    <label for="apiUrlInput">URL de tu Apps Script (Web App)</label>
+    <input type="text" id="apiUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+    <button class="cerrar-sheet" id="guardarConfigBtn">Guardar</button>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
