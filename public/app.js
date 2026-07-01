@@ -130,6 +130,10 @@ document.getElementById('configBtn').addEventListener('click', () => {
   document.getElementById('configOverlay').classList.add('active');
 });
 
+document.getElementById('cerrarConfigBtn').addEventListener('click', () => {
+  document.getElementById('configOverlay').classList.remove('active');
+});
+
 document.getElementById('guardarConfigBtn').addEventListener('click', () => {
   const url = document.getElementById('apiUrlInput').value.trim();
   localStorage.setItem(LS_API_URL, url);

@@ -345,6 +345,22 @@ button.secondary {
 
 .sheet h2 { margin-top: 0; font-size: 16px; }
 
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sheet-header h2 { margin: 0; }
+
+.cerrar-x {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
 .cerrar-sheet {
   background: var(--border);
   border: none;

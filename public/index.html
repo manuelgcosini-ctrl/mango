@@ -145,7 +145,10 @@
 
 <div id="configOverlay" class="overlay">
   <div class="sheet">
-    <h2>Configuración</h2>
+    <div class="sheet-header">
+      <h2>Configuración</h2>
+      <button id="cerrarConfigBtn" class="cerrar-x" title="Cerrar">✕</button>
+    </div>
     <label for="apiUrlInput">URL de tu Apps Script (Web App)</label>
     <input type="text" id="apiUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
     <button class="cerrar-sheet" id="guardarConfigBtn">Guardar</button>
