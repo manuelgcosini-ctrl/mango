@@ -64,7 +64,18 @@ PWA personal para anotar gastos, ingresos y transferencias en AUD, EUR, ARS y US
    clave | valor
    ```
 
-   Y una fila: `patrimonioInvertido` | `0` (lo vas actualizando a mano desde la pestaña Activos de la app cuando te acuerdes).
+   Y estas filas:
+
+   | clave | valor |
+   |---|---|
+   | patrimonioInvertido | 0 |
+   | saldoInicial_AUD_Banco | (tu saldo real de banco AUD hoy) |
+   | saldoInicial_AUD_Efectivo | (tu efectivo AUD hoy) |
+   | saldoInicial_EUR_Banco | (tu saldo real de banco EUR hoy) |
+   | saldoInicial_EUR_Efectivo | (tu efectivo EUR hoy) |
+   | saldoInicialFecha | (fecha de hoy, ej. 2026-07-01) |
+
+   `patrimonioInvertido` lo vas actualizando a mano desde la pestaña Activos de la app cuando te acuerdes. Los `saldoInicial_MONEDA_MEDIO` son necesarios porque Mango no puede reconstruir tu saldo real de antes de usar la app (el histórico migrado no trae saldo de apertura) — con esto, "Saldo estimado por cuenta" arranca de ahí y solo suma/resta movimientos con fecha posterior a `saldoInicialFecha`. Si sumás una cuenta nueva (ej. ARS o USD) más adelante, agregás su fila `saldoInicial_ARS_MercadoPago` cuando quieras; si no existe, esa cuenta arranca en 0.
 
 ## 2. Deployar el backend (Google Apps Script)
 
