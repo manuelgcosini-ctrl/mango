@@ -78,19 +78,17 @@ PWA personal para anotar gastos, ingresos y transferencias en AUD, EUR, ARS y US
 8. Implementar → copiá la **URL de la aplicación web** que te da (termina en `/exec`). Esa es tu API.
 9. Cada vez que edites `Code.gs`, tenés que hacer **Implementar → Administrar implementaciones → editar (lápiz) → Nueva versión → Implementar** para que los cambios se reflejen en esa misma URL.
 
-## 3. Publicar la PWA (para poder instalarla en el celu)
+## 3. La PWA ya está publicada
 
-Necesitás HTTPS para que el celu la deje "agregar a pantalla de inicio". Opción más simple y gratis:
+Repo: [github.com/manuelgcosini-ctrl/mango](https://github.com/manuelgcosini-ctrl/mango) (público, sin datos personales — el historial de gastos vive solo en tu Google Sheet).
 
-1. Subí la carpeta `public/` a un repo de GitHub.
-2. Activá **GitHub Pages** apuntando a esa carpeta (Settings → Pages).
-3. Te da una URL tipo `https://tuusuario.github.io/mango/`.
+URL en vivo: **https://manuelgcosini-ctrl.github.io/mango/**
 
-(Alternativas igual de válidas: Netlify o Vercel, arrastrando la carpeta `public/`.)
+Se actualiza sola: cada `git push` a `main` que toque algo en `public/` dispara el workflow de `.github/workflows/deploy-pages.yml` y redeploya en ~20 segundos. Para forzar un redeploy manual: `gh workflow run deploy-pages.yml` (o Actions → Deploy Mango a GitHub Pages → Run workflow).
 
 ## 4. Primer uso en el celu
 
-1. Abrí la URL de GitHub Pages/Netlify en Chrome (Android) o Safari (iPhone).
+1. Abrí **https://manuelgcosini-ctrl.github.io/mango/** en Chrome (Android) o Safari (iPhone).
 2. Te va a pedir la **URL del Apps Script** (la del paso 2.8) — pegala en el ícono ⚙️.
 3. Menú del navegador → **Agregar a pantalla de inicio**. Queda como una app más, se llama "Mango".
 4. Listo: abrís, elegís Gasto/Ingreso/Transferencia, cargás, cerrás.
