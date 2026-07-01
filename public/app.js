@@ -2,7 +2,7 @@ const LS_API_URL = 'mango_api_url';
 const LS_QUEUE = 'mango_cola_pendiente';
 const LS_CACHE_MOV = 'mango_cache_movimientos';
 const LS_CACHE_CAT = 'mango_cache_categorias';
-const LS_CACHE_PATRIMONIO = 'mango_cache_patrimonio';
+const LS_CACHE_CONFIG = 'mango_cache_config';
 
 const MEDIOS_POR_MONEDA = {
   AUD: [{ v: 'Banco', ico: '🏦' }, { v: 'Efectivo', ico: '💵' }],
@@ -57,6 +57,7 @@ const CATEGORIAS_DEFAULT = [
 let categorias = [];
 let movimientos = [];
 let patrimonio = 0;
+let config = {};
 
 let estado = {
   tipo: 'Gasto',
@@ -517,7 +518,14 @@ async function borrarMovimiento(id) {
 // ---------- Activos ----------
 function renderActivos() {
   const saldos = {};
+  Object.keys(config).forEach(k => {
+    const m = k.match(/^saldoInicial_(.+)_(.+)$/);
+    if (m) saldos[`${m[1]} ${m[2]}`] = Number(config[k]) || 0;
+  });
+  const corte = config.saldoInicialFecha || '';
+
   movimientos.forEach(m => {
+    if (corte && m.fecha && m.fecha <= corte) return; // ya reflejado en el saldo inicial
     if (m.tipo === 'Ingreso') {
       const k = `${m.moneda} ${m.medioPago}`;
       saldos[k] = (saldos[k] || 0) + Number(m.monto);
@@ -563,7 +571,8 @@ function renderActivos() {
 document.getElementById('guardarPatrimonioBtn').addEventListener('click', async () => {
   const valor = parseFloat(document.getElementById('patrimonioInput').value) || 0;
   patrimonio = valor;
-  localStorage.setItem(LS_CACHE_PATRIMONIO, String(valor));
+  config.patrimonioInvertido = valor;
+  localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
   try {
     await fetch(apiUrl(), {
       method: 'POST',
@@ -576,15 +585,16 @@ document.getElementById('guardarPatrimonioBtn').addEventListener('click', async 
   }
 });
 
-async function cargarPatrimonio() {
+async function cargarConfig() {
   try {
     const res = await fetch(apiUrl() + '?action=config');
-    const data = await res.json();
-    patrimonio = Number(data.patrimonioInvertido) || 0;
-    localStorage.setItem(LS_CACHE_PATRIMONIO, String(patrimonio));
+    config = await res.json();
+    localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
   } catch (err) {
-    patrimonio = Number(localStorage.getItem(LS_CACHE_PATRIMONIO)) || 0;
+    const cached = localStorage.getItem(LS_CACHE_CONFIG);
+    config = cached ? JSON.parse(cached) : {};
   }
+  patrimonio = Number(config.patrimonioInvertido) || 0;
 }
 
 // ---------- Init ----------
@@ -602,7 +612,7 @@ function init() {
   }
   cargarCategorias();
   cargarMovimientos();
-  cargarPatrimonio();
+  cargarConfig();
   sincronizarCola();
 }
 
