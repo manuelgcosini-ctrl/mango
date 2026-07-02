@@ -86,6 +86,15 @@ function fmt(n, moneda) {
   return moneda ? `${num} ${moneda}` : num;
 }
 
+// Fecha local en YYYY-MM-DD. OJO: toISOString() convierte a UTC y corre la fecha
+// según el huso horario del usuario (por eso "Ayer" mostraba mal). No usar toISOString para esto.
+function fechaLocalStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // ---------- Calculadora inline (solo aritmética: + - * / ( ) . y espacios) ----------
 function evaluarExpresion(str) {
   if (!str) return null;
@@ -188,7 +197,7 @@ document.getElementById('fechaChips').addEventListener('click', (e) => {
     document.getElementById('fecha').classList.add('oculto');
     const d = new Date();
     d.setDate(d.getDate() - Number(chip.dataset.dias));
-    document.getElementById('fecha').value = d.toISOString().slice(0, 10);
+    document.getElementById('fecha').value = fechaLocalStr(d);
   }
 });
 
@@ -287,16 +296,22 @@ function renderSubcategoriaChips() {
 
 // ---------- Categorías desde el backend ----------
 async function cargarCategorias() {
+  const cached = localStorage.getItem(LS_CACHE_CAT);
+  categorias = cached ? JSON.parse(cached) : CATEGORIAS_DEFAULT;
+  renderCategoriaChips(); // instantáneo con lo que ya tenemos, no espera la red
+
   try {
     const res = await fetch(apiUrl() + '?action=categorias');
     const data = await res.json();
-    categorias = data.length ? data : CATEGORIAS_DEFAULT;
-    localStorage.setItem(LS_CACHE_CAT, JSON.stringify(categorias));
+    const fresca = JSON.stringify(data.length ? data : CATEGORIAS_DEFAULT);
+    if (fresca !== JSON.stringify(categorias)) {
+      categorias = JSON.parse(fresca);
+      localStorage.setItem(LS_CACHE_CAT, fresca);
+      renderCategoriaChips(); // solo re-renderiza (y resetea la selección) si de verdad cambió algo
+    }
   } catch (err) {
-    const cached = localStorage.getItem(LS_CACHE_CAT);
-    categorias = cached ? JSON.parse(cached) : CATEGORIAS_DEFAULT;
+    // nos quedamos con lo que ya renderizamos (cache o default)
   }
-  renderCategoriaChips();
 }
 
 // ---------- Guardar movimiento ----------
@@ -309,7 +324,7 @@ document.getElementById('guardarBtn').addEventListener('click', async () => {
   }
 
   const movimiento = {
-    fecha: document.getElementById('fecha').value || new Date().toISOString().slice(0, 10),
+    fecha: document.getElementById('fecha').value || fechaLocalStr(new Date()),
     tipo: estado.tipo,
     monto,
     moneda: estado.moneda,
@@ -322,24 +337,40 @@ document.getElementById('guardarBtn').addEventListener('click', async () => {
     montoRecibido: estado.tipo === 'Transferencia' ? montoNumerico(document.getElementById('montoRecibido')) : ''
   };
 
+  const btn = document.getElementById('guardarBtn');
+  btn.disabled = true;
+  btn.textContent = 'Guardando…';
+
   await enviarMovimiento(movimiento);
+
+  btn.disabled = false;
+  btn.textContent = 'Guardar';
 
   document.getElementById('monto').value = '';
   document.getElementById('montoRecibido').value = '';
   document.getElementById('nota').value = '';
   document.getElementById('calcHint').textContent = '';
   document.getElementById('tasaHint').textContent = '';
-  toast('¡Listo! Movimiento guardado 🥭');
 });
+
+function agregarLocal(mov) {
+  movimientos.unshift(mov);
+  localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+  poblarFiltroMeses();
+  renderUltimos();
+  renderMovimientos();
+}
 
 async function enviarMovimiento(mov) {
   try {
-    await fetch(apiUrl(), {
+    const res = await fetch(apiUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(mov)
     });
-    await cargarMovimientos();
+    const data = await res.json();
+    agregarLocal({ ...mov, id: data.id });
+    toast('¡Listo! Movimiento guardado 🥭');
   } catch (err) {
     encolar(mov);
     toast('Sin conexión: se guardó localmente y se sincroniza después');
@@ -347,12 +378,11 @@ async function enviarMovimiento(mov) {
 }
 
 function encolar(mov) {
+  const tempId = 'pendiente-' + Date.now();
   const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]');
-  cola.push(mov);
+  cola.push({ ...mov, tempId });
   localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
-  movimientos.unshift({ ...mov, id: 'pendiente-' + Date.now(), pendiente: true });
-  localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
-  renderUltimos();
+  agregarLocal({ ...mov, id: tempId, pendiente: true });
 }
 
 async function sincronizarCola() {
@@ -361,33 +391,44 @@ async function sincronizarCola() {
   const restante = [];
   for (const mov of cola) {
     try {
-      await fetch(apiUrl(), {
+      const res = await fetch(apiUrl(), {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(mov)
       });
+      const data = await res.json();
+      const idx = movimientos.findIndex(m => m.id === mov.tempId);
+      if (idx !== -1) { movimientos[idx].id = data.id; delete movimientos[idx].pendiente; }
     } catch (err) {
       restante.push(mov);
     }
   }
   localStorage.setItem(LS_QUEUE, JSON.stringify(restante));
-  if (restante.length < cola.length) await cargarMovimientos();
+  localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+  if (restante.length < cola.length) { renderUltimos(); renderMovimientos(); }
 }
 
 // ---------- Listado / totales ----------
 async function cargarMovimientos() {
+  const cached = localStorage.getItem(LS_CACHE_MOV);
+  if (cached) {
+    movimientos = JSON.parse(cached);
+    poblarFiltroMeses();
+    renderUltimos();
+    renderMovimientos();
+  }
+
   try {
     const res = await fetch(apiUrl() + '?action=movimientos');
     movimientos = await res.json();
     movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
     localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    poblarFiltroMeses();
+    renderUltimos();
+    renderMovimientos();
   } catch (err) {
-    const cached = localStorage.getItem(LS_CACHE_MOV);
-    movimientos = cached ? JSON.parse(cached) : [];
+    if (!cached) movimientos = [];
   }
-  poblarFiltroMeses();
-  renderUltimos();
-  renderMovimientos();
 }
 
 function iconoDe(mov) {
@@ -498,6 +539,7 @@ function renderTotales(lista) {
 async function borrarMovimiento(id) {
   if (id.startsWith('pendiente-')) {
     movimientos = movimientos.filter(m => m.id !== id);
+    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
     renderMovimientos();
     renderUltimos();
     return;
@@ -509,7 +551,10 @@ async function borrarMovimiento(id) {
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action: 'borrar', id })
     });
-    await cargarMovimientos();
+    movimientos = movimientos.filter(m => m.id !== id);
+    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    renderMovimientos();
+    renderUltimos();
   } catch (err) {
     toast('No se pudo borrar: sin conexión');
   }
@@ -522,10 +567,8 @@ function renderActivos() {
     const m = k.match(/^saldoInicial_(.+)_(.+)$/);
     if (m) saldos[`${m[1]} ${m[2]}`] = Number(config[k]) || 0;
   });
-  const corte = config.saldoInicialFecha || '';
-
   movimientos.forEach(m => {
-    if (corte && m.fecha && m.fecha <= corte) return; // ya reflejado en el saldo inicial
+    if (m.id && String(m.id).startsWith('mig-')) return; // historial migrado: ya reflejado en el saldo inicial
     if (m.tipo === 'Ingreso') {
       const k = `${m.moneda} ${m.medioPago}`;
       saldos[k] = (saldos[k] || 0) + Number(m.monto);
@@ -549,7 +592,7 @@ function renderActivos() {
       }).join('')
     : '<div class="vacio">Todavía no hay movimientos</div>';
 
-  const mesActual = new Date().toISOString().slice(0, 7);
+  const mesActual = fechaLocalStr(new Date()).slice(0, 7);
   const porCategoria = {};
   movimientos
     .filter(m => m.tipo === 'Gasto' && (m.fecha || '').startsWith(mesActual))
@@ -586,20 +629,23 @@ document.getElementById('guardarPatrimonioBtn').addEventListener('click', async 
 });
 
 async function cargarConfig() {
+  const cached = localStorage.getItem(LS_CACHE_CONFIG);
+  config = cached ? JSON.parse(cached) : {};
+  patrimonio = Number(config.patrimonioInvertido) || 0;
+
   try {
     const res = await fetch(apiUrl() + '?action=config');
     config = await res.json();
     localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
+    patrimonio = Number(config.patrimonioInvertido) || 0;
   } catch (err) {
-    const cached = localStorage.getItem(LS_CACHE_CONFIG);
-    config = cached ? JSON.parse(cached) : {};
+    // nos quedamos con lo cacheado
   }
-  patrimonio = Number(config.patrimonioInvertido) || 0;
 }
 
 // ---------- Init ----------
 function init() {
-  document.getElementById('fecha').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('fecha').value = fechaLocalStr(new Date());
   document.getElementById('moneda').value = estado.moneda;
   document.getElementById('monedaDestino').value = estado.monedaDestino;
   renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });

@@ -210,6 +210,7 @@ button.primary {
   cursor: pointer;
 }
 button.primary:active { transform: scale(.98); }
+button.primary:disabled { opacity: .6; cursor: default; }
 
 button.secondary {
   width: auto;
