@@ -1,6 +1,7 @@
 const LS_API_URL = 'mango_api_url';
 const LS_QUEUE = 'mango_cola_pendiente';
-const LS_CACHE_MOV = 'mango_cache_movimientos';
+const LS_CACHE_RECIENTES = 'mango_cache_recientes';
+const LS_CACHE_MIGRADOS = 'mango_cache_migrados'; // historial migrado: no cambia, se trae una sola vez
 const LS_CACHE_CAT = 'mango_cache_categorias';
 const LS_CACHE_CONFIG = 'mango_cache_config';
 
@@ -467,7 +468,7 @@ async function guardarEdicion(id, mov) {
     const idx = movimientos.findIndex(m => m.id === id);
     if (idx !== -1) movimientos[idx] = { ...movimientos[idx], ...mov };
     movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    guardarCacheMovimientos();
     poblarFiltroMeses();
     renderUltimos();
     renderMovimientos();
@@ -482,7 +483,7 @@ async function guardarEdicion(id, mov) {
 function agregarLocal(mov) {
   movimientos.unshift(mov);
   movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha)); // unshift no alcanza: si es fecha pasada, tiene que ir a su lugar
-  localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+  guardarCacheMovimientos();
   poblarFiltroMeses();
   renderUltimos();
   renderMovimientos();
@@ -531,31 +532,58 @@ async function sincronizarCola() {
     }
   }
   localStorage.setItem(LS_QUEUE, JSON.stringify(restante));
-  localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+  guardarCacheMovimientos();
   if (restante.length < cola.length) { renderUltimos(); renderMovimientos(); }
 }
 
 // ---------- Listado / totales ----------
+// El historial migrado (miles de filas) no cambia nunca, asi que se trae una
+// unica vez y se cachea para siempre. En cada apertura solo se refresca lo
+// "reciente" (lo que vos vas cargando), que son pocas filas y responde rapido.
+function combinarYRenderizar(recientes, migrados) {
+  movimientos = [...recientes, ...migrados];
+  movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+  poblarFiltroMeses();
+  renderUltimos();
+  renderMovimientos();
+}
+
 async function cargarMovimientos() {
-  const cached = localStorage.getItem(LS_CACHE_MOV);
-  if (cached) {
-    movimientos = JSON.parse(cached);
-    poblarFiltroMeses();
-    renderUltimos();
-    renderMovimientos();
-  }
+  const cachedRecientes = localStorage.getItem(LS_CACHE_RECIENTES);
+  const cachedMigrados = localStorage.getItem(LS_CACHE_MIGRADOS);
+  const recientesIniciales = cachedRecientes ? JSON.parse(cachedRecientes) : [];
+  const migradosIniciales = cachedMigrados ? JSON.parse(cachedMigrados) : [];
+  if (cachedRecientes || cachedMigrados) combinarYRenderizar(recientesIniciales, migradosIniciales);
 
   try {
-    const res = await fetch(apiUrl() + '?action=movimientos');
-    movimientos = await res.json();
-    movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
-    poblarFiltroMeses();
-    renderUltimos();
-    renderMovimientos();
+    const res = await fetch(apiUrl() + '?action=movimientos&recientes=1');
+    const recientes = await res.json();
+    localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(recientes));
+    combinarYRenderizar(recientes, migradosIniciales);
   } catch (err) {
-    if (!cached) movimientos = [];
+    if (!cachedRecientes && !cachedMigrados) movimientos = [];
   }
+
+  if (!cachedMigrados) {
+    try {
+      const res2 = await fetch(apiUrl() + '?action=movimientos');
+      const todos = await res2.json();
+      const migrados = todos.filter(m => m.id && String(m.id).startsWith('mig-'));
+      localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
+      const recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]');
+      combinarYRenderizar(recientesActuales, migrados);
+    } catch (err) {
+      // sin historial migrado por ahora; se reintenta en la proxima apertura
+    }
+  }
+}
+
+// guarda el array en memoria partido en dos cachés: lo migrado (fijo, id "mig-") y lo reciente (cambia seguido)
+function guardarCacheMovimientos() {
+  const migrados = movimientos.filter(m => m.id && String(m.id).startsWith('mig-'));
+  const recientes = movimientos.filter(m => !(m.id && String(m.id).startsWith('mig-')));
+  localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
+  localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(recientes));
 }
 
 function iconoDe(mov) {
@@ -682,7 +710,7 @@ function renderTotales(lista) {
 async function borrarMovimiento(id) {
   if (id.startsWith('pendiente-')) {
     movimientos = movimientos.filter(m => m.id !== id);
-    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    guardarCacheMovimientos();
     renderMovimientos();
     renderUltimos();
     return;
@@ -695,7 +723,7 @@ async function borrarMovimiento(id) {
       body: JSON.stringify({ action: 'borrar', id })
     });
     movimientos = movimientos.filter(m => m.id !== id);
-    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    guardarCacheMovimientos();
     renderMovimientos();
     renderUltimos();
   } catch (err) {

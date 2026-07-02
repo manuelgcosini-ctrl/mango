@@ -1,6 +1,7 @@
 /**
  * Backend de Mango: expone la Google Sheet como una mini API.
- * GET  ?action=movimientos -> lista todos los movimientos
+ * GET  ?action=movimientos             -> lista todos los movimientos
+ * GET  ?action=movimientos&recientes=1 -> solo los que no son del historial migrado (id sin prefijo "mig-")
  * GET  ?action=categorias  -> lista tipo/categoria/subcategoria + iconos
  * GET  ?action=config      -> devuelve la config (ej. patrimonioInvertido)
  * POST { fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota,
@@ -22,6 +23,12 @@ function doGet(e) {
   }
   if (action === 'config') {
     return jsonResponse(readConfig(sheet.getSheetByName('Config')));
+  }
+  if (action === 'movimientos' && e.parameter.recientes) {
+    var recientes = readSheet(sheet.getSheetByName('Movimientos')).filter(function (m) {
+      return String(m.id).indexOf('mig-') !== 0;
+    });
+    return jsonResponse(recientes);
   }
   return jsonResponse(readSheet(sheet.getSheetByName('Movimientos')));
 }
