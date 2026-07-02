@@ -58,6 +58,7 @@ let categorias = [];
 let movimientos = [];
 let patrimonio = 0;
 let config = {};
+let editandoId = null;
 
 let estado = {
   tipo: 'Gasto',
@@ -82,7 +83,8 @@ function toast(msg) {
 }
 
 function fmt(n, moneda) {
-  const num = new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
+  const limpio = Number(n);
+  const num = new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(isFinite(limpio) ? limpio : 0);
   return moneda ? `${num} ${moneda}` : num;
 }
 
@@ -93,6 +95,12 @@ function fechaLocalStr(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+// normaliza cualquier fecha que llegue del backend a YYYY-MM-DD (por si quedó
+// algun registro viejo con timestamp completo de antes del fix del lado servidor)
+function soloFecha(f) {
+  return (f || '').toString().slice(0, 10);
 }
 
 // ---------- Calculadora inline (solo aritmética: + - * / ( ) . y espacios) ----------
@@ -341,20 +349,139 @@ document.getElementById('guardarBtn').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Guardando…';
 
-  await enviarMovimiento(movimiento);
+  if (editandoId) {
+    await guardarEdicion(editandoId, movimiento);
+    // si fallo, guardarEdicion deja editandoId y el formulario tal cual para reintentar
+  } else {
+    await enviarMovimiento(movimiento);
+    document.getElementById('monto').value = '';
+    document.getElementById('montoRecibido').value = '';
+    document.getElementById('nota').value = '';
+    document.getElementById('calcHint').textContent = '';
+    document.getElementById('tasaHint').textContent = '';
+  }
 
   btn.disabled = false;
-  btn.textContent = 'Guardar';
+  btn.textContent = editandoId ? 'Guardar cambios' : 'Guardar';
+});
 
+document.getElementById('cancelarEdicionBtn').addEventListener('click', cancelarEdicion);
+
+function resetFormularioCargar() {
   document.getElementById('monto').value = '';
   document.getElementById('montoRecibido').value = '';
   document.getElementById('nota').value = '';
   document.getElementById('calcHint').textContent = '';
   document.getElementById('tasaHint').textContent = '';
-});
+  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
+  document.getElementById('fecha').classList.add('oculto');
+  document.querySelector('#fechaChips .chip[data-dias="0"]').classList.add('active');
+  document.getElementById('fecha').value = fechaLocalStr(new Date());
+
+  estado.tipo = 'Gasto';
+  document.querySelectorAll('.tipo-btn').forEach(b => b.classList.toggle('active', b.dataset.tipo === 'Gasto'));
+  document.getElementById('bloqueTransferencia').classList.add('oculto');
+  document.getElementById('bloqueCategoria').classList.remove('oculto');
+  document.getElementById('labelCuenta').textContent = 'Cuenta';
+  renderCategoriaChips();
+
+  document.getElementById('bannerEdicion').classList.add('oculto');
+  document.getElementById('guardarBtn').textContent = 'Guardar';
+}
+
+function cancelarEdicion() {
+  editandoId = null;
+  resetFormularioCargar();
+}
+
+function abrirEdicion(mov) {
+  if (mov.pendiente) { toast('Este movimiento todavía se está sincronizando, esperá un poco'); return; }
+
+  editandoId = mov.id;
+
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelector('.tab-btn[data-view="cargar"]').classList.add('active');
+  document.getElementById('view-cargar').classList.add('active');
+
+  estado.tipo = mov.tipo;
+  document.querySelectorAll('.tipo-btn').forEach(b => b.classList.toggle('active', b.dataset.tipo === mov.tipo));
+  document.getElementById('bloqueTransferencia').classList.toggle('oculto', estado.tipo !== 'Transferencia');
+  document.getElementById('bloqueCategoria').classList.toggle('oculto', estado.tipo === 'Transferencia');
+  document.getElementById('labelCuenta').textContent = estado.tipo === 'Transferencia' ? 'Cuenta de origen' : 'Cuenta';
+
+  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
+  document.getElementById('chipOtraFecha').classList.add('active');
+  document.getElementById('fecha').classList.remove('oculto');
+  document.getElementById('fecha').value = soloFecha(mov.fecha);
+
+  estado.moneda = mov.moneda;
+  document.getElementById('moneda').value = mov.moneda;
+  estado.medio = mov.medioPago;
+  renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });
+
+  if (estado.tipo === 'Transferencia') {
+    estado.monedaDestino = mov.monedaDestino;
+    document.getElementById('monedaDestino').value = mov.monedaDestino;
+    estado.medioDestino = mov.medioPagoDestino;
+    renderMedioChips('medioChipsDestino', estado.monedaDestino, estado.medioDestino, (m) => { estado.medioDestino = m; });
+    document.getElementById('montoRecibido').value = mov.montoRecibido || '';
+  } else {
+    renderCategoriaChips();
+    if (mov.categoria) {
+      const catBtn = [...document.querySelectorAll('.cat-chip')].find(b => b.dataset.cat === mov.categoria);
+      if (catBtn) {
+        document.querySelectorAll('.cat-chip').forEach(b => b.classList.remove('active'));
+        catBtn.classList.add('active');
+        estado.categoria = mov.categoria;
+        renderSubcategoriaChips();
+        if (mov.subcategoria) {
+          const subBtn = [...document.querySelectorAll('#subcategoriaChips .chip')].find(b => b.dataset.sub === mov.subcategoria);
+          if (subBtn) {
+            document.querySelectorAll('#subcategoriaChips .chip').forEach(b => b.classList.remove('active'));
+            subBtn.classList.add('active');
+            estado.subcategoria = mov.subcategoria;
+          }
+        }
+      }
+    }
+  }
+
+  document.getElementById('monto').value = mov.monto;
+  document.getElementById('nota').value = mov.nota || '';
+  document.getElementById('calcHint').textContent = '';
+  actualizarTasaHint();
+
+  document.getElementById('bannerEdicion').classList.remove('oculto');
+  document.getElementById('guardarBtn').textContent = 'Guardar cambios';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function guardarEdicion(id, mov) {
+  try {
+    await fetch(apiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'editar', id, ...mov })
+    });
+    const idx = movimientos.findIndex(m => m.id === id);
+    if (idx !== -1) movimientos[idx] = { ...movimientos[idx], ...mov };
+    movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
+    poblarFiltroMeses();
+    renderUltimos();
+    renderMovimientos();
+    toast('Cambios guardados 🥭');
+    editandoId = null;
+    resetFormularioCargar();
+  } catch (err) {
+    toast('No se pudo editar: revisá tu conexión y volvé a tocar "Guardar cambios"');
+  }
+}
 
 function agregarLocal(mov) {
   movimientos.unshift(mov);
+  movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha)); // unshift no alcanza: si es fecha pasada, tiene que ir a su lugar
   localStorage.setItem(LS_CACHE_MOV, JSON.stringify(movimientos));
   poblarFiltroMeses();
   renderUltimos();
@@ -446,16 +573,23 @@ function renderUltimos() {
     return;
   }
   cont.innerHTML = ultimos.map(m => `
-    <div class="mov-mini">
+    <div class="mov-mini" data-id="${m.id}">
       <div class="gasto-info">
         <div class="gasto-ico">${iconoDe(m)}</div>
         <div class="gasto-texto">
           <div class="cat">${m.categoria || m.tipo}${m.subcategoria ? ' · ' + m.subcategoria : ''}</div>
-          <div class="meta">${m.fecha}${m.nota ? ' · ' + m.nota : ''}</div>
+          <div class="meta">${soloFecha(m.fecha)}${m.nota ? ' · ' + m.nota : ''}</div>
         </div>
       </div>
       <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${fmt(m.monto, m.moneda)}</div>
     </div>`).join('');
+
+  cont.querySelectorAll('.mov-mini').forEach(el => {
+    el.addEventListener('click', () => {
+      const mov = movimientos.find(m => m.id === el.dataset.id);
+      if (mov) abrirEdicion(mov);
+    });
+  });
 }
 
 function poblarFiltroMeses() {
@@ -502,12 +636,12 @@ function renderMovimientos() {
       ? `${m.moneda} ${m.medioPago} → ${m.monedaDestino} ${m.medioPagoDestino}`
       : `${m.moneda} ${m.medioPago || ''}`;
     html += `
-      <div class="gasto-item">
+      <div class="gasto-item" data-id="${m.id}">
         <div class="gasto-info">
           <div class="gasto-ico">${iconoDe(m)}</div>
           <div class="gasto-texto">
             <div class="cat">${m.categoria || m.tipo}${m.subcategoria ? ' · ' + m.subcategoria : ''}${m.pendiente ? '<span class="badge-pendiente">pendiente</span>' : ''}</div>
-            <div class="meta">${m.fecha} · ${cuentaTxt}${m.nota ? ' · ' + m.nota : ''}</div>
+            <div class="meta">${soloFecha(m.fecha)} · ${cuentaTxt}${m.nota ? ' · ' + m.nota : ''}</div>
           </div>
         </div>
         <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${fmt(m.monto, m.moneda)}</div>
@@ -516,8 +650,17 @@ function renderMovimientos() {
   });
   cont.innerHTML = html;
 
+  cont.querySelectorAll('.gasto-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const mov = movimientos.find(m => m.id === el.dataset.id);
+      if (mov) abrirEdicion(mov);
+    });
+  });
   cont.querySelectorAll('.gasto-del').forEach(btn => {
-    btn.addEventListener('click', () => borrarMovimiento(btn.dataset.id));
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      borrarMovimiento(btn.dataset.id);
+    });
   });
 }
 

@@ -114,6 +114,29 @@ input, select, textarea {
 .row > div, .row > select { flex: 1; }
 
 /* ---------- Tipo toggle ---------- */
+.banner-edicion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(251,146,60,.12);
+  border: 1px solid var(--mango);
+  color: var(--mango);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+.banner-edicion button {
+  background: none;
+  border: 1px solid var(--mango);
+  color: var(--mango);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .tipo-toggle {
   display: flex;
   gap: 6px;
@@ -260,6 +283,7 @@ button.secondary {
   align-items: center;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
 }
 .gasto-item:last-child, .mov-mini:last-child { border-bottom: none; }
 
