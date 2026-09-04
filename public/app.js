@@ -722,7 +722,16 @@ async function cargarTodo() {
   const migradosIniciales = cachedMigrados ? JSON.parse(cachedMigrados) : [];
 
   try {
-    const data = await apiGet({ action: 'bootstrap' });
+    let data = await apiGet({ action: 'bootstrap' });
+    if (!data || Array.isArray(data) || !('recientes' in data)) {
+      // backend viejo (sin bootstrap): hacemos las tres llamadas de antes
+      const [cats, cfg, rec] = await Promise.all([
+        apiGet({ action: 'categorias' }),
+        apiGet({ action: 'config' }),
+        apiGet({ action: 'movimientos', recientes: 1 })
+      ]);
+      data = { categorias: cats, config: cfg, recientes: rec };
+    }
     aplicarCategorias(data.categorias);
     aplicarConfig(data.config);
     localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(data.recientes || []));
