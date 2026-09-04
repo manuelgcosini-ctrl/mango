@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mango-shell-v2';
+const CACHE_NAME = 'mango-shell-v3';
 const SHELL_FILES = [
   './index.html',
   './style.css',
@@ -23,18 +23,36 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Estrategia: la app se sirve al instante desde caché (abre rápido aunque la señal sea mala)
+// y en paralelo se baja la versión nueva. Si app.js cambió, se avisa a la página para que
+// muestre "hay una versión nueva" y el usuario actualice cuando quiera.
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return; // no cachear llamadas al Apps Script
+  if (event.request.method !== 'GET') return;
 
-  // red primero (para agarrar siempre la ultima version deployada), cache como respaldo si no hay señal
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        return response;
-      })
-      .catch(() => caches.match(event.request))
-  );
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(event.request);
+
+    const actualizar = fetch(event.request).then(async (fresh) => {
+      if (!fresh || !fresh.ok) return fresh;
+      if (cached && url.pathname.endsWith('app.js')) {
+        const [viejo, nuevo] = await Promise.all([cached.clone().text(), fresh.clone().text()]);
+        if (viejo !== nuevo) {
+          const clientes = await self.clients.matchAll({ type: 'window' });
+          clientes.forEach((c) => c.postMessage({ tipo: 'nueva-version' }));
+        }
+      }
+      await cache.put(event.request, fresh.clone());
+      return fresh;
+    }).catch(() => null);
+
+    if (cached) {
+      event.waitUntil(actualizar);
+      return cached;
+    }
+    const fresh = await actualizar;
+    return fresh || new Response('Sin conexión', { status: 503 });
+  })());
 });

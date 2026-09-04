@@ -20,22 +20,36 @@
       <div class="tagline">plata, sin drama</div>
     </div>
   </div>
-  <button id="configBtn" title="Configuración">⚙️</button>
+  <div class="header-actions">
+    <button id="refrescarBtn" class="icon-btn" title="Actualizar datos">🔄</button>
+    <button id="configBtn" class="icon-btn" title="Configuración">⚙️</button>
+  </div>
 </header>
 
 <main>
   <div class="tabs">
     <button class="tab-btn active" data-view="cargar">Cargar</button>
     <button class="tab-btn" data-view="movimientos">Movimientos</button>
-    <button class="tab-btn" data-view="activos">Activos</button>
+    <button class="tab-btn" data-view="activos">Resumen</button>
   </div>
 
   <section id="view-cargar" class="view active">
     <div class="card">
-      <div id="bannerEdicion" class="banner-edicion oculto">
-        ✏️ Editando movimiento
-        <button type="button" id="cancelarEdicionBtn">Cancelar</button>
+      <div id="bannerEdicion" class="banner oculto">
+        <span>✏️ Editando movimiento</span>
+        <span class="banner-btns">
+          <button type="button" id="duplicarBtn" title="Crear una copia con fecha de hoy">Duplicar hoy</button>
+          <button type="button" id="borrarEdicionBtn" class="peligro">Borrar</button>
+          <button type="button" id="cancelarEdicionBtn">Cancelar</button>
+        </span>
       </div>
+      <div id="bannerLigar" class="banner banner-ligar oculto">
+        <span id="bannerLigarTexto">🔗 Ligando otro cargo</span>
+        <span class="banner-btns">
+          <button type="button" id="cancelarLigarBtn">Listo</button>
+        </span>
+      </div>
+
       <div class="tipo-toggle" id="tipoToggle">
         <button class="tipo-btn active" data-tipo="Gasto">💸 Gasto</button>
         <button class="tipo-btn" data-tipo="Ingreso">💰 Ingreso</button>
@@ -83,7 +97,7 @@
       </div>
 
       <label for="monto">Monto</label>
-      <input type="text" id="monto" inputmode="decimal" placeholder="0 (podés escribir 45+12.50)">
+      <input type="text" id="monto" inputmode="decimal" placeholder="0 (podés escribir 45+12,50)">
       <div class="calc-hint" id="calcHint"></div>
 
       <div id="bloqueCategoria">
@@ -93,9 +107,15 @@
       </div>
 
       <label for="nota">Nota (opcional)</label>
-      <input type="text" id="nota" placeholder="Ej: supermercado Coles">
+      <input type="text" id="nota" list="notasSugeridas" placeholder="Ej: supermercado Coles" autocomplete="off">
+      <datalist id="notasSugeridas"></datalist>
 
       <button class="primary" id="guardarBtn">Guardar</button>
+
+      <div id="ligarRow" class="ligar-row oculto">
+        <button type="button" id="ligarBtn" class="link-btn">🔗 Ligar otro cargo a este gasto</button>
+        <div class="muted-note">Para cuando un solo gasto sale como varios cargos en la tarjeta (envío + propina, dos pagos, etc.).</div>
+      </div>
     </div>
 
     <div class="card ultimos-card">
@@ -105,6 +125,7 @@
   </section>
 
   <section id="view-movimientos" class="view">
+    <input type="search" id="buscar" placeholder="Buscar en notas y categorías" autocomplete="off">
     <div class="filtros">
       <select id="filtroTipo">
         <option value="">Todos los tipos</option>
@@ -125,17 +146,29 @@
     <div id="totales" class="totales"></div>
 
     <div id="listaMovimientos"></div>
+    <button id="mostrarMasBtn" class="secondary ancho oculto">Mostrar más</button>
   </section>
 
   <section id="view-activos" class="view">
     <div class="card">
-      <div class="card-title">Saldo estimado por cuenta</div>
+      <div class="card-title">Saldo por cuenta <span class="hint-inline">tocá una para ajustarla al saldo real</span></div>
       <div id="saldosCuentas"></div>
     </div>
+
     <div class="card">
-      <div class="card-title">Gasto por categoría (este mes)</div>
-      <div id="gastoPorCategoria"></div>
+      <div class="mes-nav">
+        <button type="button" id="mesAnteriorBtn" class="icon-btn">‹</button>
+        <div class="card-title mes-titulo" id="mesTitulo"></div>
+        <button type="button" id="mesSiguienteBtn" class="icon-btn">›</button>
+      </div>
+      <div id="resumenMes"></div>
     </div>
+
+    <div class="card">
+      <div class="card-title">Últimos 6 meses</div>
+      <div id="tendencia"></div>
+    </div>
+
     <div class="card">
       <div class="card-title">Patrimonio invertido (aprox.)</div>
       <div class="row">
@@ -155,11 +188,32 @@
     </div>
     <label for="apiUrlInput">URL de tu Apps Script (Web App)</label>
     <input type="text" id="apiUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+    <label for="tokenInput">Token (opcional, el mismo que pusiste en la pestaña Config)</label>
+    <input type="text" id="tokenInput" placeholder="vacío si no usás token" autocomplete="off">
     <button class="cerrar-sheet" id="guardarConfigBtn">Guardar</button>
+    <button class="link-btn" id="limpiarCacheBtn">Volver a bajar todo el historial</button>
+  </div>
+</div>
+
+<div id="ajusteOverlay" class="overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <h2 id="ajusteTitulo">Ajustar saldo</h2>
+      <button id="cerrarAjusteBtn" class="cerrar-x" title="Cerrar">✕</button>
+    </div>
+    <div class="muted-note" id="ajusteEstimado"></div>
+    <label for="ajusteInput">Saldo real ahora</label>
+    <input type="text" id="ajusteInput" inputmode="decimal" placeholder="0">
+    <div class="muted-note">Mango va a mover el punto de partida de esta cuenta para que el saldo coincida con lo que ves en el banco. No toca ningún movimiento.</div>
+    <button class="cerrar-sheet" id="guardarAjusteBtn">Guardar</button>
   </div>
 </div>
 
 <div id="toast" class="toast"></div>
+<div id="avisoVersion" class="aviso-version oculto">
+  Hay una versión nueva de Mango
+  <button type="button" id="actualizarBtn">Actualizar</button>
+</div>
 
 <script src="app.js"></script>
 </body>

@@ -7,11 +7,13 @@ PWA personal para anotar gastos, ingresos y transferencias en AUD, EUR, ARS y US
 1. Andá a Google Sheets y creá una planilla nueva. Llamala, por ejemplo, "Mango DB".
 2. Creá tres pestañas con estos nombres exactos: **Movimientos**, **Categorias** y **Config**.
 
-3. En **Movimientos**, poné estos encabezados en la fila 1 (columnas A a M):
+3. En **Movimientos**, poné estos encabezados en la fila 1 (columnas A a N):
 
    ```
-   id | fecha | tipo | monto | moneda | medioPago | categoria | subcategoria | nota | monedaDestino | medioPagoDestino | montoRecibido | timestamp
+   id | fecha | tipo | monto | moneda | medioPago | categoria | subcategoria | nota | monedaDestino | medioPagoDestino | montoRecibido | timestamp | grupo
    ```
+
+   `grupo` (columna N) es la que liga varios cargos de un mismo gasto (ej. envío + propina de un delivery). Si tu planilla es de antes de septiembre 2026, agregá solo el encabezado `grupo` en la celda N1; las filas viejas quedan vacías ahí y no pasa nada.
 
 4. En **Categorias**, poné estos encabezados en la fila 1:
 
@@ -73,9 +75,11 @@ PWA personal para anotar gastos, ingresos y transferencias en AUD, EUR, ARS y US
    | saldoInicial_AUD_Efectivo | (tu efectivo AUD hoy) |
    | saldoInicial_EUR_Banco | (tu saldo real de banco EUR hoy) |
    | saldoInicial_EUR_Efectivo | (tu efectivo EUR hoy) |
-   | saldoInicialFecha | (fecha de hoy, ej. 2026-07-01) |
+   | token | (opcional, ver abajo) |
 
-   `patrimonioInvertido` lo vas actualizando a mano desde la pestaña Activos de la app cuando te acuerdes. Los `saldoInicial_MONEDA_MEDIO` son necesarios porque Mango no puede reconstruir tu saldo real de antes de usar la app (el histórico migrado no trae saldo de apertura) — con esto, "Saldo estimado por cuenta" arranca de ahí y solo suma/resta movimientos con fecha posterior a `saldoInicialFecha`. Si sumás una cuenta nueva (ej. ARS o USD) más adelante, agregás su fila `saldoInicial_ARS_MercadoPago` cuando quieras; si no existe, esa cuenta arranca en 0.
+   `patrimonioInvertido` lo vas actualizando desde la pestaña Resumen de la app. Los `saldoInicial_MONEDA_MEDIO` son el punto de partida de cada cuenta: Mango suma a ese número solo los movimientos que cargaste vos (el histórico migrado no cuenta para el saldo, ya está incluido ahí). No hace falta editarlos a mano: en Resumen tocás la cuenta, escribís el saldo real que ves en el banco y la app recalcula el punto de partida sola. Si aparece una cuenta nueva (ARS, USD) arranca en 0 hasta que la ajustes.
+
+   `token` es opcional. Si lo ponés (cualquier texto, ej. una frase larga), toda llamada a la API tiene que traer ese mismo valor, así la URL sola ya no alcanza para leer o escribir tu planilla. Después lo cargás una vez en ⚙️ de la app. Si dejás la fila vacía o no la creás, no hay chequeo.
 
 ## 2. Deployar el backend (Google Apps Script)
 
@@ -106,15 +110,16 @@ Se actualiza sola: cada `git push` a `main` que toque algo en `public/` dispara 
 
 ## Cómo funciona
 
-- **Cargar**: elegís tipo (Gasto/Ingreso/Transferencia), fecha con chips rápidos (Hoy/Ayer/Antes de ayer), cuenta como moneda + medio de pago, monto (podés escribir una cuentita tipo `45+12.50` y la calcula sola), categoría/subcategoría con íconos, nota. Debajo del botón Guardar hay un mini-listado de los últimos movimientos para chequear si ya cargaste algo. En Transferencia, además pedís la cuenta destino y el monto recibido, y te muestra la tasa implícita.
-- **Movimientos**: lista agrupada por mes, filtrable por tipo/moneda/mes, con totales de gasto e ingreso por moneda (sin conversión entre monedas).
-- **Activos**: saldo estimado por cuenta (calculado solo de tus movimientos), gasto por categoría del mes, y un campo manual de "patrimonio invertido" (ETFs, cripto) que actualizás vos a mano — la app no se conecta a ninguna cotización.
-- **Offline**: si no hay señal al guardar, el movimiento queda encolado en el celu y se sincroniza solo cuando vuelve la conexión.
+- **Cargar**: tipo (Gasto/Ingreso/Transferencia), fecha con chips rápidos (Hoy/Ayer/Antes de ayer o calendario), cuenta como moneda + medio de pago, monto (acepta coma o punto decimal y cuentitas tipo `45+12,50`), categoría/subcategoría con íconos, nota con sugerencias de lo que ya usaste en esa categoría. Debajo del botón Guardar está el mini-listado de últimos movimientos; tocás uno y se abre para editar (con Duplicar hoy y Borrar).
+- **Ligar cargos**: cuando un gasto sale como varios cargos en la tarjeta (envío + propina, dos pagos), después de guardar el primero tocás "Ligar otro cargo": queda todo precargado y solo escribís el monto. En las listas aparecen como una sola entrada con el total y un desplegable con las partes.
+- **Movimientos**: búsqueda por nota/categoría, filtros por tipo/moneda/mes (arranca en el mes actual), totales por moneda. El historial largo se muestra de a tandas con "Mostrar más".
+- **Resumen**: saldo por cuenta (tocás una para ajustarla al saldo real del banco), resumen del mes con navegación entre meses (gastado, ingresado, balance y gasto por categoría con barras), gasto mensual de los últimos 6 meses por moneda, y el campo manual de patrimonio invertido.
+- **Offline**: si no hay señal al guardar, el movimiento queda encolado en el celu y se sincroniza solo cuando vuelve la conexión. Cada movimiento nace con un id generado en el celu, así que reintentar un guardado nunca duplica.
+- **Velocidad**: la app abre desde caché al instante y baja la versión nueva en segundo plano (avisa con un cartel cuando hay una). Al abrir hace una sola llamada al backend (`bootstrap`) que trae categorías, config y los movimientos recientes. El histórico migrado se baja una sola vez y queda guardado en el celu; "Volver a bajar todo el historial" en ⚙️ lo fuerza si hiciera falta.
 - Las categorías y sus íconos se leen de la pestaña **Categorias**: para agregar/sacar/cambiar una, editás la planilla directamente.
 
 ## Próximos pasos posibles (no incluidos en esta versión)
 
-- Migrar el histórico de Money Manager / Realbyte a este formato (traducir categorías viejas, excluir ajustes de apertura, separar transferencias de gastos reales).
+- Pestañas abajo y botón Guardar fijo (al alcance del pulgar).
 - Presupuestos por categoría con alertas.
-- Gráficos de tendencia.
-- Conversión a una sola moneda para un total de patrimonio.
+- Conversión a una sola moneda para un total de patrimonio (cotizaciones manuales en Config).

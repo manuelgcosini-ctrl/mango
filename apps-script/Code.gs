@@ -1,65 +1,103 @@
 /**
  * Backend de Mango: expone la Google Sheet como una mini API.
+ *
+ * GET  ?action=bootstrap               -> { categorias, config, recientes } en una sola llamada
  * GET  ?action=movimientos             -> lista todos los movimientos
  * GET  ?action=movimientos&recientes=1 -> solo los que no son del historial migrado (id sin prefijo "mig-")
- * GET  ?action=categorias  -> lista tipo/categoria/subcategoria + iconos
- * GET  ?action=config      -> devuelve la config (ej. patrimonioInvertido)
- * POST { fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota,
- *        monedaDestino, medioPagoDestino, montoRecibido } -> agrega un movimiento
- * POST { action: 'editar', id, ...campos } -> edita un movimiento existente
- * POST { action: 'borrar', id } -> borra un movimiento por id
- * POST { action: 'patrimonio', valor } -> actualiza el patrimonio invertido manual
+ * GET  ?action=categorias / ?action=config
+ * POST { id?, fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota,
+ *        monedaDestino, medioPagoDestino, montoRecibido, grupo? } -> agrega (o, si el id ya existe, actualiza)
+ * POST { action: 'editar', id, ...campos }
+ * POST { action: 'borrar', id }
+ * POST { action: 'config', clave, valor }   -> escribe cualquier clave de Config
+ * POST { action: 'patrimonio', valor }      -> alias viejo de config patrimonioInvertido
+ *
+ * Seguridad opcional: si en Config existe la clave "token", toda llamada tiene que
+ * traer el mismo valor (?token=... en GET, "token" en el body en POST).
  */
 
-var CAMPOS_MOVIMIENTO = ['fecha', 'tipo', 'monto', 'moneda', 'medioPago', 'categoria',
-  'subcategoria', 'nota', 'monedaDestino', 'medioPagoDestino', 'montoRecibido'];
+var COLS = 14; // id, fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota, monedaDestino, medioPagoDestino, montoRecibido, timestamp, grupo
 
 function doGet(e) {
-  var action = e.parameter.action || 'movimientos';
-  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cfg = readConfig(ss.getSheetByName('Config'));
+  if (!autorizado(cfg, e.parameter.token)) return jsonResponse({ error: 'no autorizado' });
 
-  if (action === 'categorias') {
-    return jsonResponse(readSheet(sheet.getSheetByName('Categorias')));
-  }
-  if (action === 'config') {
-    return jsonResponse(readConfig(sheet.getSheetByName('Config')));
-  }
-  if (action === 'movimientos' && e.parameter.recientes) {
-    var recientes = readSheet(sheet.getSheetByName('Movimientos')).filter(function (m) {
-      return String(m.id).indexOf('mig-') !== 0;
+  var action = e.parameter.action || 'movimientos';
+
+  if (action === 'bootstrap') {
+    return jsonResponse({
+      categorias: readSheet(ss.getSheetByName('Categorias')),
+      config: cfg,
+      recientes: soloRecientes(readSheet(ss.getSheetByName('Movimientos')))
     });
-    return jsonResponse(recientes);
   }
-  return jsonResponse(readSheet(sheet.getSheetByName('Movimientos')));
+  if (action === 'categorias') return jsonResponse(readSheet(ss.getSheetByName('Categorias')));
+  if (action === 'config') return jsonResponse(cfg);
+
+  var movimientos = readSheet(ss.getSheetByName('Movimientos'));
+  if (e.parameter.recientes) movimientos = soloRecientes(movimientos);
+  return jsonResponse(movimientos);
 }
 
 function doPost(e) {
   var body = JSON.parse(e.postData.contents);
-  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cfg = readConfig(ss.getSheetByName('Config'));
+  if (!autorizado(cfg, body.token)) return jsonResponse({ error: 'no autorizado' });
+
+  var movSheet = ss.getSheetByName('Movimientos');
 
   if (body.action === 'borrar') {
-    borrarMovimiento(sheet.getSheetByName('Movimientos'), body.id);
+    var fila = filaPorId(movSheet, body.id);
+    if (fila) movSheet.deleteRow(fila);
     return jsonResponse({ ok: true });
   }
 
   if (body.action === 'editar') {
-    editarMovimiento(sheet.getSheetByName('Movimientos'), body);
+    var filaEd = filaPorId(movSheet, body.id);
+    if (filaEd) escribirFila(movSheet, filaEd, body);
+    return jsonResponse({ ok: true, encontrado: !!filaEd });
+  }
+
+  if (body.action === 'config') {
+    escribirConfig(ss.getSheetByName('Config'), body.clave, body.valor);
     return jsonResponse({ ok: true });
   }
 
   if (body.action === 'patrimonio') {
-    escribirConfig(sheet.getSheetByName('Config'), 'patrimonioInvertido', body.valor);
+    escribirConfig(ss.getSheetByName('Config'), 'patrimonioInvertido', body.valor);
     return jsonResponse({ ok: true });
   }
 
-  var movSheet = sheet.getSheetByName('Movimientos');
-  var id = Utilities.getUuid();
-  movSheet.appendRow([id].concat(filaDesdeBody(body)).concat([new Date()]));
-  // fuerza texto plano en la columna fecha: si no, Sheets la autoconvierte a
-  // un valor de fecha real y al leerla vuelve como objeto Date (ver readSheet)
-  var fila = movSheet.getLastRow();
-  movSheet.getRange(fila, 2).setNumberFormat('@');
+  // alta. Si el cliente manda id y ya existe, se actualiza en vez de duplicar
+  // (esto hace que reintentar un guardado por mala señal sea inofensivo).
+  var id = body.id || Utilities.getUuid();
+  var existente = body.id ? filaPorId(movSheet, body.id) : null;
+  if (existente) {
+    escribirFila(movSheet, existente, body);
+    return jsonResponse({ ok: true, id: id, duplicado: true });
+  }
+  movSheet.appendRow([id].concat(filaDesdeBody(body)).concat([new Date(), body.grupo || '']));
+  var ultima = movSheet.getLastRow();
+  movSheet.getRange(ultima, 2).setNumberFormat('@'); // fecha como texto plano, ver readSheet
   return jsonResponse({ ok: true, id: id });
+}
+
+function autorizado(cfg, token) {
+  if (!cfg.token) return true;
+  return String(token || '') === String(cfg.token);
+}
+
+function soloRecientes(movimientos) {
+  return movimientos.filter(function (m) { return String(m.id).indexOf('mig-') !== 0; });
+}
+
+function filaPorId(sheet, id) {
+  if (!id) return null;
+  var celda = sheet.getRange(1, 1, sheet.getLastRow(), 1)
+    .createTextFinder(String(id)).matchEntireCell(true).findNext();
+  return celda ? celda.getRow() : null;
 }
 
 function filaDesdeBody(body) {
@@ -78,26 +116,10 @@ function filaDesdeBody(body) {
   ];
 }
 
-function editarMovimiento(sheet, body) {
-  var data = sheet.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(body.id)) {
-      var fila = i + 1;
-      sheet.getRange(fila, 2, 1, 11).setValues([filaDesdeBody(body)]);
-      sheet.getRange(fila, 2).setNumberFormat('@');
-      return;
-    }
-  }
-}
-
-function borrarMovimiento(sheet, id) {
-  var data = sheet.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(id)) {
-      sheet.deleteRow(i + 1);
-      return;
-    }
-  }
+function escribirFila(sheet, fila, body) {
+  sheet.getRange(fila, 2, 1, 11).setValues([filaDesdeBody(body)]);
+  sheet.getRange(fila, 2).setNumberFormat('@');
+  sheet.getRange(fila, COLS).setValue(body.grupo || '');
 }
 
 function readSheet(sheet) {
