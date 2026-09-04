@@ -803,7 +803,7 @@ function htmlFila(m, extra = '') {
         </div>
       </div>
       <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${fmt(m.monto, m.moneda)}</div>
-      <button class="gasto-del" data-id="${m.id}" title="Borrar">🗑</button>
+      <span class="grupo-flecha">›</span>
     </div>`;
 }
 
@@ -842,8 +842,6 @@ function renderUltimos() {
 // un solo listener por lista (delegación): no importa cuántas filas haya
 function delegarLista(cont) {
   cont.addEventListener('click', (e) => {
-    const del = e.target.closest('.gasto-del');
-    if (del) { e.stopPropagation(); borrarMovimiento(del.dataset.id); return; }
     const grupo = e.target.closest('.grupo-item');
     if (grupo) {
       const k = grupo.dataset.grupo;
@@ -939,28 +937,55 @@ function renderTotales(lista) {
   ).join('') || '';
 }
 
-async function borrarMovimiento(id) {
-  const mov = movimientos.find(m => m.id === id);
-  if (!mov) return false;
-  if (!confirm(`¿Borrar ${nombreMov(mov)} de ${fmt(mov.monto, mov.moneda)}?`)) return false;
+// toast con un botón de acción (ej. "Deshacer"); devuelve una función para cerrarlo
+function toastAccion(msg, etiqueta, accion, ms) {
+  const el = $('toast');
+  el.innerHTML = '';
+  el.append(msg);
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = etiqueta;
+  b.addEventListener('click', () => { cerrar(); accion(); });
+  el.appendChild(b);
+  el.classList.add('show');
+  clearTimeout(el._t);
+  const cerrar = () => { el.classList.remove('show'); el.innerHTML = ''; };
+  el._t = setTimeout(cerrar, ms);
+  return cerrar;
+}
 
-  if (mov.pendiente) {
-    const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]').filter(c => c.id !== id);
-    localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
-    movimientos = movimientos.filter(m => m.id !== id);
+// Borrar sin cartel de confirmación: se saca al instante, con 5 segundos para deshacer.
+// Recién después de esos 5 segundos se le avisa al servidor.
+function borrarMovimiento(id) {
+  const idx = movimientos.findIndex(m => m.id === id);
+  if (idx === -1) return false;
+  const mov = movimientos[idx];
+  movimientos.splice(idx, 1);
+  despuesDeCambiar();
+
+  let deshecho = false;
+  toastAccion(`Borrado: ${nombreMov(mov)} ${fmt(mov.monto, mov.moneda)}`, 'Deshacer', () => {
+    deshecho = true;
+    movimientos.push(mov);
     despuesDeCambiar();
-    return true;
-  }
-  try {
-    await apiPost({ action: 'borrar', id });
-    movimientos = movimientos.filter(m => m.id !== id);
-    despuesDeCambiar();
-    toast('Borrado');
-    return true;
-  } catch (err) {
-    toast('No se pudo borrar: sin conexión');
-    return false;
-  }
+  }, 5000);
+
+  setTimeout(async () => {
+    if (deshecho) return;
+    if (mov.pendiente) {
+      const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]').filter(c => c.id !== id);
+      localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
+      return;
+    }
+    try {
+      await apiPost({ action: 'borrar', id });
+    } catch (err) {
+      movimientos.push(mov);
+      despuesDeCambiar();
+      toast('No se pudo borrar en la planilla (sin señal). Lo volví a poner.');
+    }
+  }, 5200);
+  return true;
 }
 
 // ---------- Resumen (Activos) ----------

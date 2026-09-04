@@ -27,12 +27,6 @@
 </header>
 
 <main>
-  <div class="tabs">
-    <button class="tab-btn active" data-view="cargar">Cargar</button>
-    <button class="tab-btn" data-view="movimientos">Movimientos</button>
-    <button class="tab-btn" data-view="activos">Resumen</button>
-  </div>
-
   <section id="view-cargar" class="view active">
     <div class="card">
       <div id="bannerEdicion" class="banner oculto">
@@ -110,7 +104,9 @@
       <input type="text" id="nota" list="notasSugeridas" placeholder="Ej: supermercado Coles" autocomplete="off">
       <datalist id="notasSugeridas"></datalist>
 
-      <button class="primary" id="guardarBtn">Guardar</button>
+      <div class="barra-guardar">
+        <button class="primary" id="guardarBtn">Guardar</button>
+      </div>
 
       <div id="ligarRow" class="ligar-row oculto">
         <button type="button" id="ligarBtn" class="link-btn">🔗 Ligar otro cargo a este gasto</button>
@@ -179,6 +175,12 @@
     </div>
   </section>
 </main>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-view="cargar"><span class="tab-ico">➕</span>Cargar</button>
+  <button class="tab-btn" data-view="movimientos"><span class="tab-ico">📋</span>Movimientos</button>
+  <button class="tab-btn" data-view="activos"><span class="tab-ico">📊</span>Resumen</button>
+</nav>
 
 <div id="configOverlay" class="overlay">
   <div class="sheet">

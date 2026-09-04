@@ -18,7 +18,7 @@ body {
   font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
-  padding-bottom: 84px;
+  padding-bottom: calc(96px + env(safe-area-inset-bottom));
 }
 
 header {
@@ -176,29 +176,50 @@ header h1 { font-size: 20px; margin: 0; }
 
 main { padding: 0 16px; max-width: 480px; margin: 0 auto; }
 
+/* barra de pestañas fija abajo, al alcance del pulgar */
 .tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
   display: flex;
-  gap: 8px;
-  margin: 8px 0 16px;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+  background: var(--card);
+  border-top: 1px solid var(--border);
 }
 
 .tab-btn {
   flex: 1;
-  padding: 10px 4px;
+  max-width: 160px;
+  padding: 6px 4px 4px;
   border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--card);
+  border: none;
+  background: none;
   color: var(--muted);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.tab-btn.active {
-  background: var(--accent);
-  color: var(--accent-dark);
-  border-color: var(--accent);
+  font-size: 11px;
   font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
+.tab-ico { font-size: 20px; line-height: 1; }
+.tab-btn.active { color: var(--accent); background: rgba(34,197,94,.10); }
+
+/* Guardar siempre a mano, pegado al pie mientras el formulario está en pantalla */
+.barra-guardar {
+  position: sticky;
+  bottom: calc(70px + env(safe-area-inset-bottom));
+  background: var(--card);
+  margin: 0 -16px;
+  padding: 8px 16px 10px;
+  z-index: 5;
+}
+.barra-guardar .primary { margin-top: 6px; }
 
 .view { display: none; }
 .view.active { display: block; animation: fadein .18s ease; }
@@ -529,9 +550,20 @@ button.secondary {
   margin-top: 12px;
 }
 
+.toast button {
+  background: var(--accent);
+  color: var(--accent-dark);
+  border: none;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-weight: 700;
+  font-size: 13px;
+  margin-left: 10px;
+  cursor: pointer;
+}
 .toast {
   position: fixed;
-  bottom: 20px;
+  bottom: calc(90px + env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
   background: #111827;
