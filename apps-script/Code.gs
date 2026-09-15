@@ -7,7 +7,8 @@
  * GET  ?action=movimientos&desde=N&limite=M -> { filas, total, desde } para bajar el historial por tandas
  * GET  ?action=categorias / ?action=config
  * POST { id?, fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota,
- *        monedaDestino, medioPagoDestino, montoRecibido, grupo? } -> agrega (o, si el id ya existe, actualiza)
+ *        monedaDestino, medioPagoDestino, montoRecibido, grupo? } -> agrega. Si el id ya existe
+ *        no toca nada y responde { duplicado: true } (reintentar un guardado es inofensivo).
  * POST { action: 'editar', id, ...campos }
  * POST { action: 'borrar', id }
  * POST { action: 'config', clave, valor }   -> escribe cualquier clave de Config
@@ -15,81 +16,115 @@
  *
  * Seguridad opcional: si en Config existe la clave "token", toda llamada tiene que
  * traer el mismo valor (?token=... en GET, "token" en el body en POST).
+ *
+ * Config "historialVersion": la escribe el backend solo cuando se edita o borra una fila
+ * del historial importado (id "mig-"). Los otros dispositivos la comparan con la suya y,
+ * si cambió, vuelven a bajar el historial.
  */
 
 var COLS = 14; // id, fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota, monedaDestino, medioPagoDestino, montoRecibido, timestamp, grupo
+var ACCIONES_POST = ['borrar', 'editar', 'config', 'patrimonio'];
 
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var cfg = readConfig(ss.getSheetByName('Config'));
+  var tz = ss.getSpreadsheetTimeZone();
+  var cfg = readConfig(ss.getSheetByName('Config'), tz);
   if (!autorizado(cfg, e.parameter.token)) return jsonResponse({ error: 'no autorizado' });
 
   var action = e.parameter.action || 'movimientos';
+  var movSheet = ss.getSheetByName('Movimientos');
 
   if (action === 'bootstrap') {
-    var todos = readSheet(ss.getSheetByName('Movimientos'));
+    var rec = leerRecientes(movSheet, tz);
     return jsonResponse({
-      categorias: readSheet(ss.getSheetByName('Categorias')),
+      categorias: readSheet(ss.getSheetByName('Categorias'), tz),
       config: cfg,
-      recientes: soloRecientes(todos),
-      total: todos.length
+      recientes: rec.filas,
+      total: rec.total
     });
   }
-  if (action === 'categorias') return jsonResponse(readSheet(ss.getSheetByName('Categorias')));
+  if (action === 'categorias') return jsonResponse(readSheet(ss.getSheetByName('Categorias'), tz));
   if (action === 'config') return jsonResponse(cfg);
 
   // tanda del historial: lee solo ese rango de filas, no la hoja entera
   if (action === 'movimientos' && e.parameter.desde !== undefined) {
-    return jsonResponse(leerPagina(ss.getSheetByName('Movimientos'),
+    return jsonResponse(leerPagina(movSheet, tz,
       Number(e.parameter.desde) || 0, Number(e.parameter.limite) || 600));
   }
 
-  var movimientos = readSheet(ss.getSheetByName('Movimientos'));
+  var movimientos = readSheet(movSheet, tz);
   if (e.parameter.recientes) movimientos = soloRecientes(movimientos);
   return jsonResponse(movimientos);
 }
 
 function doPost(e) {
-  var body = JSON.parse(e.postData.contents);
+  // Un solo POST a la vez. Sin esto, un borrado corre las filas mientras otra
+  // edición está escribiendo por número de fila y termina pisando otro movimiento.
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    return manejarPost(e);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function manejarPost(e) {
+  var body;
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonResponse({ error: 'body inválido' });
+  }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var cfg = readConfig(ss.getSheetByName('Config'));
+  var tz = ss.getSpreadsheetTimeZone();
+  var cfgSheet = ss.getSheetByName('Config');
+  var cfg = readConfig(cfgSheet, tz);
   if (!autorizado(cfg, body.token)) return jsonResponse({ error: 'no autorizado' });
+
+  // una acción desconocida antes caía en "alta" y, con un id existente, blanqueaba la fila
+  if (body.action && ACCIONES_POST.indexOf(body.action) === -1) {
+    return jsonResponse({ error: 'acción desconocida: ' + body.action });
+  }
 
   var movSheet = ss.getSheetByName('Movimientos');
 
   if (body.action === 'borrar') {
+    if (!body.id) return jsonResponse({ error: 'falta id' });
     var fila = filaPorId(movSheet, body.id);
     if (fila) movSheet.deleteRow(fila);
-    return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true, encontrado: !!fila, historialVersion: marcarHistorial(cfgSheet, body.id, !!fila) });
   }
 
   if (body.action === 'editar') {
+    if (!body.id) return jsonResponse({ error: 'falta id' });
+    if (!filaValida(body)) return jsonResponse({ error: 'movimiento incompleto (falta fecha o monto)' });
     var filaEd = filaPorId(movSheet, body.id);
     if (filaEd) escribirFila(movSheet, filaEd, body);
-    return jsonResponse({ ok: true, encontrado: !!filaEd });
+    return jsonResponse({ ok: true, encontrado: !!filaEd, historialVersion: marcarHistorial(cfgSheet, body.id, !!filaEd) });
   }
 
   if (body.action === 'config') {
-    escribirConfig(ss.getSheetByName('Config'), body.clave, body.valor);
+    if (!body.clave) return jsonResponse({ error: 'falta clave' });
+    escribirConfig(cfgSheet, body.clave, body.valor);
     return jsonResponse({ ok: true });
   }
 
   if (body.action === 'patrimonio') {
-    escribirConfig(ss.getSheetByName('Config'), 'patrimonioInvertido', body.valor);
+    escribirConfig(cfgSheet, 'patrimonioInvertido', body.valor);
     return jsonResponse({ ok: true });
   }
 
-  // alta. Si el cliente manda id y ya existe, se actualiza en vez de duplicar
-  // (esto hace que reintentar un guardado por mala señal sea inofensivo).
+  // alta
+  if (!filaValida(body)) return jsonResponse({ error: 'movimiento incompleto (falta fecha o monto)' });
   var id = body.id || Utilities.getUuid();
-  var existente = body.id ? filaPorId(movSheet, body.id) : null;
-  if (existente) {
-    escribirFila(movSheet, existente, body);
+  if (body.id && filaPorId(movSheet, body.id)) {
+    // Ya estaba: es el reintento de un guardado cuya respuesta se perdió en el camino.
+    // No se pisa nada, así una edición hecha entre medio desde otro dispositivo sobrevive.
     return jsonResponse({ ok: true, id: id, duplicado: true });
   }
   movSheet.appendRow([id].concat(filaDesdeBody(body)).concat([new Date(), body.grupo || '']));
-  var ultima = movSheet.getLastRow();
-  movSheet.getRange(ultima, 2).setNumberFormat('@'); // fecha como texto plano, ver readSheet
+  movSheet.getRange(movSheet.getLastRow(), 2).setNumberFormat('@'); // fecha como texto plano, ver mapearFilas
   return jsonResponse({ ok: true, id: id });
 }
 
@@ -98,8 +133,24 @@ function autorizado(cfg, token) {
   return String(token || '') === String(cfg.token);
 }
 
+function filaValida(body) {
+  return !!body.fecha && isFinite(Number(body.monto));
+}
+
+// si se tocó una fila del historial importado, los otros dispositivos tienen que volver a bajarlo
+function marcarHistorial(cfgSheet, id, huboCambio) {
+  if (!huboCambio || String(id).indexOf('mig-') !== 0) return null;
+  var v = String(Date.now());
+  escribirConfig(cfgSheet, 'historialVersion', v);
+  return v;
+}
+
+function esMigrado(id) {
+  return String(id).indexOf('mig-') === 0;
+}
+
 function soloRecientes(movimientos) {
-  return movimientos.filter(function (m) { return String(m.id).indexOf('mig-') !== 0; });
+  return movimientos.filter(function (m) { return !esMigrado(m.id); });
 }
 
 function filaPorId(sheet, id) {
@@ -149,15 +200,38 @@ function mapearFilas(headers, data, tz) {
   });
 }
 
-function readSheet(sheet) {
-  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+function readSheet(sheet, tz) {
   var data = sheet.getDataRange().getValues();
   var headers = data.shift();
   return mapearFilas(headers, data, tz);
 }
 
-function leerPagina(sheet, desde, limite) {
-  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+// Lo reciente (lo que se carga desde la app) vive al final de la hoja, después del bloque
+// del historial importado. Se lee solo la columna de ids (barato) para ubicar dónde empieza
+// y se trae únicamente ese bloque, en vez de las 2800 filas con sus fechas formateadas una por una.
+function leerRecientes(sheet, tz) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var total = Math.max(0, lastRow - 1);
+  if (!total) return { filas: [], total: 0 };
+
+  var ids = sheet.getRange(2, 1, total, 1).getValues();
+  var primero = -1;
+  var contiguo = true;
+  for (var i = 0; i < ids.length; i++) {
+    var mig = esMigrado(ids[i][0]);
+    if (!mig && primero === -1) primero = i;
+    if (mig && primero !== -1) { contiguo = false; break; }
+  }
+  if (primero === -1) return { filas: [], total: total };
+  if (!contiguo) return { filas: soloRecientes(readSheet(sheet, tz)), total: total }; // hay filas mezcladas: camino lento pero correcto
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var data = sheet.getRange(2 + primero, 1, total - primero, lastCol).getValues();
+  return { filas: mapearFilas(headers, data, tz), total: total };
+}
+
+function leerPagina(sheet, tz, desde, limite) {
   var lastRow = sheet.getLastRow();
   var lastCol = sheet.getLastColumn();
   var total = Math.max(0, lastRow - 1);
@@ -168,8 +242,7 @@ function leerPagina(sheet, desde, limite) {
   return { filas: mapearFilas(headers, data, tz), total: total, desde: desde };
 }
 
-function readConfig(sheet) {
-  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+function readConfig(sheet, tz) {
   var data = sheet.getDataRange().getValues();
   var out = {};
   for (var i = 1; i < data.length; i++) {
@@ -182,10 +255,15 @@ function readConfig(sheet) {
   return out;
 }
 
+function claveNormalizada(k) {
+  return String(k || '').replace(/\s+/g, '').toLowerCase();
+}
+
 function escribirConfig(sheet, clave, valor) {
   var data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
-    if (data[i][0] === clave) {
+    // "saldoInicial_ARS_Mercado Pago" y "saldoInicial_ARS_MercadoPago" son la misma clave
+    if (claveNormalizada(data[i][0]) === claveNormalizada(clave)) {
       sheet.getRange(i + 1, 2).setValue(valor);
       return;
     }

@@ -33,7 +33,26 @@ header {
 header h1 { font-size: 20px; margin: 0; }
 .tagline { font-size: 11px; color: var(--muted); margin-top: 1px; }
 
-.header-actions { display: flex; gap: 4px; }
+.header-actions { display: flex; gap: 4px; align-items: center; }
+[hidden] { display: none !important; }
+
+/* estado de sincronización: solo aparece cuando hay algo que todavía no subió */
+.sync-pill {
+  background: rgba(251,146,60,.15);
+  color: var(--mango);
+  border: 1px solid var(--mango);
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sync-pill.error { background: rgba(239,68,68,.15); color: var(--danger); border-color: var(--danger); }
+.sync-pill.subiendo { background: rgba(34,197,94,.12); color: var(--accent); border-color: var(--accent); }
+
+.fecha-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.fecha-hint::first-letter { text-transform: uppercase; }
 .icon-btn {
   background: none;
   border: none;
@@ -393,6 +412,7 @@ input, select, textarea {
 }
 .ops button:active { background: var(--border); }
 
+.calc-hint.error { color: var(--danger); }
 .calc-hint, .tasa-hint {
   font-size: 12px;
   color: var(--accent);
@@ -605,3 +625,5 @@ button.secondary {
   text-align: center;
 }
 .toast.show { opacity: 1; }
+/* en Cargar, el toast va arriba de la barra de Guardar para no taparla */
+body.vista-cargar .toast { bottom: calc(146px + env(safe-area-inset-bottom)); }

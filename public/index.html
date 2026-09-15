@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Mango</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg">
@@ -21,8 +21,9 @@
     </div>
   </div>
   <div class="header-actions">
-    <button id="refrescarBtn" class="icon-btn" title="Actualizar datos">🔄</button>
-    <button id="configBtn" class="icon-btn" title="Configuración">⚙️</button>
+    <button type="button" id="syncPill" class="sync-pill" hidden></button>
+    <button id="refrescarBtn" class="icon-btn" title="Actualizar datos" aria-label="Actualizar datos">🔄</button>
+    <button id="configBtn" class="icon-btn" title="Configuración" aria-label="Configuración">⚙️</button>
   </div>
 </header>
 
@@ -58,6 +59,7 @@
         <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
       </div>
       <input type="date" id="fecha" class="fecha-custom oculto">
+      <div class="fecha-hint" id="fechaHint"></div>
 
       <label id="labelCuenta">Cuenta</label>
       <div class="row">
@@ -86,12 +88,12 @@
           <div class="chip-row" id="medioChipsDestino"></div>
         </div>
         <label for="montoRecibido">Monto recibido</label>
-        <input type="text" id="montoRecibido" inputmode="decimal" placeholder="0">
+        <input type="text" id="montoRecibido" inputmode="decimal" enterkeyhint="done" placeholder="0">
         <div class="tasa-hint" id="tasaHint"></div>
       </div>
 
       <label for="monto">Monto</label>
-      <input type="text" id="monto" inputmode="decimal" placeholder="0">
+      <input type="text" id="monto" inputmode="decimal" enterkeyhint="done" placeholder="0">
       <div class="ops" id="opsMonto">
         <button type="button" data-op="+">+</button>
         <button type="button" data-op="-">−</button>
@@ -108,7 +110,7 @@
       </div>
 
       <label for="nota">Nota (opcional)</label>
-      <input type="text" id="nota" list="notasSugeridas" placeholder="Ej: supermercado Coles" autocomplete="off">
+      <input type="text" id="nota" list="notasSugeridas" enterkeyhint="done" placeholder="Ej: supermercado Coles" autocomplete="off">
       <datalist id="notasSugeridas"></datalist>
 
       <div id="ligarRow" class="ligar-row oculto">
@@ -218,7 +220,7 @@
   </div>
 </div>
 
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="avisoVersion" class="aviso-version oculto">
   Hay una versión nueva de Mango
   <button type="button" id="actualizarBtn">Actualizar</button>

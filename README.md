@@ -81,6 +81,8 @@ PWA personal para anotar gastos, ingresos y transferencias en AUD, EUR, ARS y US
 
    `token` es opcional. Si lo ponés (cualquier texto, ej. una frase larga), toda llamada a la API tiene que traer ese mismo valor, así la URL sola ya no alcanza para leer o escribir tu planilla. Después lo cargás una vez en ⚙️ de la app. Si dejás la fila vacía o no la creás, no hay chequeo.
 
+   `historialVersion` la crea y actualiza el backend solo: cambia cada vez que se edita o borra una fila del histórico migrado desde la app, y así los otros dispositivos saben que tienen que volver a bajar el historial. No la toques.
+
 ## 2. Deployar el backend (Google Apps Script)
 
 1. En la misma planilla: **Extensiones → Apps Script**.
@@ -110,12 +112,12 @@ Se actualiza sola: cada `git push` a `main` que toque algo en `public/` dispara 
 
 ## Cómo funciona
 
-- **Cargar**: tipo (Gasto/Ingreso/Transferencia), fecha con chips rápidos (Hoy/Ayer/Antes de ayer o calendario), cuenta como moneda + medio de pago, monto (acepta coma o punto decimal y cuentitas tipo `45+12,50`), categoría/subcategoría con íconos, nota con sugerencias de lo que ya usaste en esa categoría. Debajo del botón Guardar está el mini-listado de últimos movimientos; tocás uno y se abre para editar (con Duplicar hoy y Borrar).
+- **Cargar**: tipo (Gasto/Ingreso/Transferencia), fecha con chips rápidos (Hoy/Ayer/Antes de ayer o calendario), cuenta como moneda + medio de pago, monto (acepta `12,50`, `1.234,56` y también `1,234.56` como lo muestra el banco australiano; cuentitas tipo `45+12,50`; si no entiende lo que escribiste lo dice y no guarda), categoría/subcategoría con íconos, nota con sugerencias de lo que ya usaste en esa categoría. Debajo del botón Guardar está el mini-listado de últimos movimientos; tocás uno y se abre para editar (con Duplicar hoy y Borrar).
 - **Ligar cargos**: cuando un gasto sale como varios cargos en la tarjeta (envío + propina, dos pagos), después de guardar el primero tocás "Ligar otro cargo": queda todo precargado y solo escribís el monto. En las listas aparecen como una sola entrada con el total y un desplegable con las partes.
 - **Movimientos**: búsqueda por nota/categoría, filtros por tipo/moneda/mes (arranca en el mes actual), totales por moneda. El historial largo se muestra de a tandas con "Mostrar más".
 - **Resumen**: saldo por cuenta (tocás una para ajustarla al saldo real del banco), resumen del mes con navegación entre meses (gastado, ingresado, balance y gasto por categoría con barras), gasto mensual de los últimos 6 meses por moneda, y el campo manual de patrimonio invertido.
-- **Offline**: si no hay señal al guardar, el movimiento queda encolado en el celu y se sincroniza solo cuando vuelve la conexión. Cada movimiento nace con un id generado en el celu, así que reintentar un guardado nunca duplica.
-- **Velocidad**: la app abre desde caché al instante y baja la versión nueva en segundo plano (avisa con un cartel cuando hay una). Al abrir hace una sola llamada al backend (`bootstrap`) que trae categorías, config y los movimientos recientes. El histórico migrado se baja una sola vez y queda guardado en el celu; "Volver a bajar todo el historial" en ⚙️ lo fuerza si hiciera falta.
+- **Guardado instantáneo y sin pérdidas**: todo cambio (alta, edición, borrado, ajuste de saldo) se anota primero en el celu y recién después se manda a la planilla, en orden y de a uno. Si se corta la señal o cerrás la app a mitad de camino, la operación queda en la cola y se reintenta sola; mientras tanto el movimiento se ve con la marca "pendiente" y arriba aparece un pill "N sin subir" (tocalo para reintentar; si la planilla rechaza algo, por ejemplo el token mal, lo dice ahí). Cada movimiento nace con un id generado en el celu y el backend no pisa una fila que ya existe, así que reintentar nunca duplica ni deshace una edición hecha desde otro dispositivo.
+- **Velocidad**: la app abre desde caché al instante y baja la versión nueva en segundo plano (avisa con un cartel cuando hay una, y solo después de tener todos los archivos nuevos juntos). Al abrir hace una sola llamada al backend (`bootstrap`) que trae categorías, config y los movimientos recientes; el backend lee solo el bloque de filas recientes, no la hoja entera. El histórico migrado se baja una sola vez, por tandas, y queda guardado en el celu; se vuelve a bajar solo si la cuenta de filas no cierra o si se editó una fila vieja desde otro dispositivo. "Volver a bajar todo el historial" en ⚙️ lo fuerza si hiciera falta.
 - Las categorías y sus íconos se leen de la pestaña **Categorias**: para agregar/sacar/cambiar una, editás la planilla directamente.
 
 ## Próximos pasos posibles (no incluidos en esta versión)

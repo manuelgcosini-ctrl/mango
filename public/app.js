@@ -1,11 +1,11 @@
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
-const LS_QUEUE = 'mango_cola_pendiente';
+const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
 const LS_CACHE_RECIENTES = 'mango_cache_recientes';
-const LS_CACHE_MIGRADOS = 'mango_cache_migrados'; // historial migrado: no cambia, se trae una sola vez
+const LS_CACHE_MIGRADOS = 'mango_cache_migrados'; // historial migrado: casi nunca cambia, se trae una sola vez
 const LS_CACHE_CAT = 'mango_cache_categorias';
 const LS_CACHE_CONFIG = 'mango_cache_config';
-const LS_CACHE_TOTAL = 'mango_cache_total';
+const LS_HIST_VER = 'mango_historial_version';   // versión del historial que tenemos bajada (ver Code.gs)
 
 const TIMEOUT_MS = 20000;
 const TIMEOUT_LARGO = 60000;     // para bajar tandas del historial, que tardan más
@@ -64,6 +64,7 @@ const CATEGORIAS_DEFAULT = [
 
 let categorias = [];
 let movimientos = [];
+let migradosMem = null;      // historial migrado ya parseado (evita releer los 800 KB del localStorage)
 let patrimonio = 0;
 let config = {};
 let editandoId = null;
@@ -75,7 +76,11 @@ let mesResumen = null;       // YYYY-MM que muestra Resumen
 let ajusteCuenta = null;     // cuenta que se está ajustando en Resumen
 let gruposAbiertos = new Set();
 let ultimaSync = 0;          // cuándo se refrescó contra la planilla por última vez
+let ultimaConfirmacion = 0;  // cuándo la planilla confirmó por última vez una operación de la cola
+let sincronizando = false;
+let errorSync = '';          // último error que devolvió la planilla al subir la cola
 let campoMonto = null;       // último campo de monto enfocado (para los botones + − × ÷)
+const indiceBusqueda = new Map(); // id -> texto normalizado, para no re-normalizar 2800 filas por tecla
 
 let estado = {
   tipo: 'Gasto',
@@ -97,8 +102,34 @@ function nuevoId() {
   return 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2);
 }
 
+// para innerHTML: notas y nombres de categoría vienen de la planilla, no se confía en ellos
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// campos que viven solo en el celu y no van ni a la planilla ni al cache
+const sinInternos = (k, v) => (k === 'pendiente' || (typeof k === 'string' && k.startsWith('_'))) ? undefined : v;
+
+function guardarLS(clave, valor) {
+  try {
+    localStorage.setItem(clave, valor);
+  } catch (err) {
+    throw new Error('el celu no tiene espacio para guardar (localStorage lleno)');
+  }
+}
+
+function vibrar(patron) {
+  try { if (navigator.vibrate) navigator.vibrate(patron); } catch (err) { /* sin soporte */ }
+}
+
 function toast(msg, ms = 2500) {
   const el = $('toast');
+  if (el._accion) {
+    // hay un toast con "Deshacer" abierto: no lo pisamos, este va después
+    clearTimeout(el._cola);
+    el._cola = setTimeout(() => toast(msg, ms), Math.max(0, el._accionHasta - Date.now()) + 50);
+    return;
+  }
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(el._t);
@@ -126,13 +157,28 @@ function fechaLocalStr(d) {
   return `${y}-${m}-${day}`;
 }
 
+// marca de tiempo local con el mismo formato que escribe la planilla (solo para ordenar dentro de un día)
+function tsLocal() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${fechaLocalStr(d)}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function soloFecha(f) { return (f || '').toString().slice(0, 10); }
 function mesDe(f) { return soloFecha(f).slice(0, 7); }
+function fechaValida(f) { return /^\d{4}-\d{2}-\d{2}$/.test(f || ''); }
 
 function nombreMes(ym) {
-  const [y, m] = ym.split('-').map(Number);
+  const [y, m] = (ym || '').split('-').map(Number);
   const nombres = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  if (!nombres[m - 1] || !y) return ym || 'sin fecha';
   return `${nombres[m - 1]} ${y}`;
+}
+
+function fechaLarga(iso) {
+  if (!fechaValida(iso)) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
 }
 
 function sumarMeses(ym, delta) {
@@ -145,10 +191,14 @@ function sinAcentos(s) {
   return (s || '').toString().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 
-function esMigrado(m) { return !!(m.id && String(m.id).startsWith('mig-')); }
+function esMigrado(m) { return !!(m && m.id && String(m.id).startsWith('mig-')); }
 function claveGrupo(m) { return m.grupo || m.id; }
 
 // ---------- Red ----------
+// La planilla respondió, pero con un error (token mal, acción desconocida…). No es cuestión de señal.
+class ApiError extends Error {}
+function esErrorDeRed(err) { return !(err instanceof ApiError); }
+
 async function apiGet(params, timeoutMs = TIMEOUT_MS) {
   const q = new URLSearchParams(params);
   if (token()) q.set('token', token());
@@ -157,7 +207,7 @@ async function apiGet(params, timeoutMs = TIMEOUT_MS) {
   try {
     const res = await fetch(apiUrl() + '?' + q.toString(), { signal: ctrl.signal });
     const data = await res.json();
-    if (data && data.error) throw new Error(data.error);
+    if (data && data.error) throw new ApiError(data.error);
     return data;
   } finally {
     clearTimeout(t);
@@ -171,11 +221,11 @@ async function apiPost(body) {
     const res = await fetch(apiUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(token() ? { ...body, token: token() } : body),
+      body: JSON.stringify(token() ? { ...body, token: token() } : body, sinInternos),
       signal: ctrl.signal
     });
     const data = await res.json();
-    if (data && data.error) throw new Error(data.error);
+    if (data && data.error) throw new ApiError(data.error);
     return data;
   } finally {
     clearTimeout(t);
@@ -183,25 +233,31 @@ async function apiPost(body) {
 }
 
 // ---------- Números: acepta coma decimal y calculadora inline ----------
-// "12,50" -> 12.5 ; "1.500" -> 1500 ; "1.500,25" -> 1500.25 ; "45+12,50" -> 57.5
-function normalizarNumero(str) {
-  let s = (str || '').toString().trim();
-  if (!s) return '';
-  if (s.includes(',') && s.includes('.')) {
-    s = s.replace(/\./g, '').replace(/,/g, '.');
-  } else if (s.includes(',')) {
-    s = s.replace(/,/g, '.');
-  } else if (/^\d{1,3}(\.\d{3})+$/.test(s)) {
-    s = s.replace(/\./g, ''); // "1.500" o "12.345.678" = separador de miles
-  }
-  return s;
+// "12,50" -> 12.5 ; "1.500" -> 1500 ; "1.500,25" -> 1500.25 ; "1,234.56" -> 1234.56 ; "45+12,50" -> 57.5
+// Cada número de la expresión se normaliza por separado. El decimal es el separador que
+// aparece ÚLTIMO ("1.234,56" es formato argentino, "1,234.56" es el del banco australiano).
+function normalizarToken(t) {
+  const uc = t.lastIndexOf(',');
+  const up = t.lastIndexOf('.');
+  if (uc !== -1 && up !== -1) return uc > up ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, '');
+  if (uc !== -1) return t.split(',').length > 2 ? t.replace(/,/g, '') : t.replace(',', '.');
+  if (up !== -1) return /^\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '') : t; // "1.500" = mil quinientos
+  return t;
 }
+
+function normalizarNumero(str) {
+  const s = (str || '').toString().replace(/\s+/g, ''); // "1 000" = mil
+  if (!s) return '';
+  return s.replace(/[0-9.,]+/g, normalizarToken);
+}
+
+function tieneOperador(limpio) { return /[+\-*/]/.test(limpio.slice(1)); }
 
 function evaluarExpresion(str) {
   const limpio = normalizarNumero(str);
   if (!limpio) return null;
-  if (!/^[0-9+\-*/.() ]+$/.test(limpio)) return null;
-  if (!/[+\-*/]/.test(limpio.slice(1))) return null; // sin operador, no hay nada que calcular
+  if (!/^[0-9+\-*/.()]+$/.test(limpio)) return null;
+  if (!tieneOperador(limpio)) return null; // sin operador, no hay nada que calcular
   try {
     const resultado = Function('"use strict"; return (' + limpio + ')')();
     return (typeof resultado === 'number' && isFinite(resultado)) ? Math.round(resultado * 100) / 100 : null;
@@ -210,23 +266,43 @@ function evaluarExpresion(str) {
   }
 }
 
+// Estricto a propósito: antes "1.500+" se guardaba como 1,5 y "5/0" como 5 sin avisar.
+// Si no se puede interpretar entero, devuelve NaN y el guardado se rechaza.
 function montoNumerico(inputEl) {
-  const raw = inputEl.value;
-  const calc = evaluarExpresion(raw);
-  if (calc !== null) return calc;
-  const n = parseFloat(normalizarNumero(raw));
+  const limpio = normalizarNumero(inputEl.value);
+  if (!limpio) return NaN;
+  if (!/^[0-9+\-*/.()]+$/.test(limpio)) return NaN;
+  if (tieneOperador(limpio)) {
+    const calc = evaluarExpresion(inputEl.value);
+    return calc === null ? NaN : calc;
+  }
+  const n = Number(limpio);
   return isFinite(n) ? Math.round(n * 100) / 100 : NaN;
 }
 
-$('monto').addEventListener('input', (e) => {
-  const calc = evaluarExpresion(e.target.value);
-  $('calcHint').textContent = calc !== null ? `= ${fmt(calc)}` : '';
-  actualizarTasaHint();
-});
+// muestra cómo se interpretó lo tecleado cuando no es obvio (operadores, miles, coma y punto juntos)
+function actualizarCalcHint() {
+  const raw = $('monto').value;
+  const hint = $('calcHint');
+  const ambiguo = /[+\-*/]/.test(raw.slice(1)) || /[.,]\d{3}(\D|$)/.test(raw) || (raw.includes(',') && raw.includes('.')) || /\s/.test(raw.trim());
+  if (!raw.trim() || !ambiguo) { hint.textContent = ''; hint.classList.remove('error'); return; }
+  const n = montoNumerico($('monto'));
+  hint.textContent = isFinite(n) ? `= ${fmt(n)}` : 'No entiendo ese monto';
+  hint.classList.toggle('error', !isFinite(n));
+}
+
+$('monto').addEventListener('input', () => { actualizarCalcHint(); actualizarTasaHint(); });
 $('montoRecibido').addEventListener('input', actualizarTasaHint);
 
 ['monto', 'montoRecibido'].forEach(id => {
   $(id).addEventListener('focus', () => { campoMonto = $(id); });
+});
+
+// Enter (o la tecla "Listo" del teclado del celu) guarda
+['monto', 'montoRecibido', 'nota'].forEach(id => {
+  $(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('guardarBtn').click(); }
+  });
 });
 
 // insertan el operador donde está el cursor, sin perder el foco ni el teclado numérico
@@ -269,16 +345,22 @@ $('configBtn').addEventListener('click', () => {
 });
 $('cerrarConfigBtn').addEventListener('click', () => $('configOverlay').classList.remove('active'));
 $('guardarConfigBtn').addEventListener('click', () => {
-  localStorage.setItem(LS_API_URL, $('apiUrlInput').value.trim());
+  const urlNueva = $('apiUrlInput').value.trim();
+  if (urlNueva !== apiUrl() && leerCola().length) {
+    toast(`Ojo: hay ${leerCola().length} operaciones sin subir; van a ir a la planilla nueva`, 5000);
+  }
+  localStorage.setItem(LS_API_URL, urlNueva);
   localStorage.setItem(LS_TOKEN, $('tokenInput').value.trim());
   $('configOverlay').classList.remove('active');
+  errorSync = '';
   toast('Configuración guardada');
   init();
 });
 $('limpiarCacheBtn').addEventListener('click', () => {
   localStorage.removeItem(LS_CACHE_MIGRADOS);
   localStorage.removeItem(LS_CACHE_RECIENTES);
-  localStorage.removeItem(LS_CACHE_TOTAL);
+  localStorage.removeItem(LS_HIST_VER);
+  migradosMem = null;
   $('configOverlay').classList.remove('active');
   toast('Bajando todo de nuevo…');
   cargarTodo();
@@ -286,8 +368,13 @@ $('limpiarCacheBtn').addEventListener('click', () => {
 $('refrescarBtn').addEventListener('click', async () => {
   $('refrescarBtn').classList.add('girando');
   await cargarTodo();
+  await sincronizarCola();
   $('refrescarBtn').classList.remove('girando');
   toast('Actualizado');
+});
+$('syncPill').addEventListener('click', () => {
+  if (errorSync) toast(`La planilla respondió: ${errorSync}`, 5000);
+  sincronizarCola();
 });
 
 // ---------- Tabs ----------
@@ -320,6 +407,23 @@ $('tipoToggle').addEventListener('click', (e) => {
 });
 
 // ---------- Fecha ----------
+function actualizarFechaHint() {
+  const v = $('fecha').value;
+  $('fechaHint').textContent = fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha con "Otra 📅"';
+}
+
+// "Hoy" se recalcula al volver a la app: una PWA puede quedar abierta desde ayer
+// y si no, el chip dice Hoy pero la fecha de abajo es la de ayer.
+function refrescarFechaChip() {
+  const activo = document.querySelector('#fechaChips .chip.active');
+  if (activo && activo.dataset.dias !== undefined) {
+    const d = new Date();
+    d.setDate(d.getDate() - Number(activo.dataset.dias));
+    $('fecha').value = fechaLocalStr(d);
+  }
+  actualizarFechaHint();
+}
+
 $('fechaChips').addEventListener('click', (e) => {
   const chip = e.target.closest('.chip');
   if (!chip) return;
@@ -336,19 +440,21 @@ $('fechaChips').addEventListener('click', (e) => {
     }
   } else {
     fechaInput.classList.add('oculto');
-    const d = new Date();
-    d.setDate(d.getDate() - Number(chip.dataset.dias));
-    fechaInput.value = fechaLocalStr(d);
+    refrescarFechaChip();
   }
 });
+$('fecha').addEventListener('change', actualizarFechaHint);
+$('fecha').addEventListener('input', actualizarFechaHint);
 
 // ---------- Cuenta (moneda + medio) ----------
 function renderMedioChips(contId, moneda, medioActivo, onSelect) {
   const cont = $(contId);
-  const opciones = MEDIOS_POR_MONEDA[moneda] || [];
+  const opciones = [...(MEDIOS_POR_MONEDA[moneda] || [])];
+  // un medio que ya no está en la lista (fila vieja) se muestra igual, para no reasignarlo sin querer
+  if (medioActivo && !opciones.some(o => o.v === medioActivo)) opciones.push({ v: medioActivo, ico: '🏷️' });
   const activo = opciones.some(o => o.v === medioActivo) ? medioActivo : opciones[0].v;
   cont.innerHTML = opciones.map(o =>
-    `<button type="button" class="chip${o.v === activo ? ' active' : ''}" data-medio="${o.v}">${o.ico} ${o.v}</button>`
+    `<button type="button" class="chip${o.v === activo ? ' active' : ''}" data-medio="${esc(o.v)}">${o.ico} ${esc(o.v)}</button>`
   ).join('');
   onSelect(activo);
   cont.querySelectorAll('.chip').forEach(c => {
@@ -375,9 +481,13 @@ $('monedaDestino').addEventListener('change', (e) => {
 function fuenteCategorias() { return categorias.length ? categorias : CATEGORIAS_DEFAULT; }
 
 function subcategoriaSugerida(cat) {
-  const usados = movimientos.filter(m => m.categoria === cat && m.subcategoria);
-  if (usados.length) return usados[0].subcategoria; // movimientos viene ordenado por fecha desc
+  const usado = movimientos.find(m => m.categoria === cat && m.subcategoria); // movimientos viene ordenado por fecha desc
+  if (usado) return usado.subcategoria;
   return SUB_SUGERIDA[cat] || null;
+}
+
+function htmlCatChip(cat, ico) {
+  return `<button type="button" class="cat-chip" data-cat="${esc(cat)}"><span class="ico">${ico || '🏷️'}</span>${esc(cat)}</button>`;
 }
 
 function renderCategoriaChips() {
@@ -387,19 +497,7 @@ function renderCategoriaChips() {
   const vistas = new Set();
   delTipo.forEach(c => { if (!vistas.has(c.categoria)) { vistas.add(c.categoria); unicas.push(c); } });
 
-  cont.innerHTML = unicas.map(c =>
-    `<button type="button" class="cat-chip" data-cat="${c.categoria}"><span class="ico">${c.categoriaIcono || ''}</span>${c.categoria}</button>`
-  ).join('');
-
-  cont.querySelectorAll('.cat-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      cont.querySelectorAll('.cat-chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      estado.categoria = btn.dataset.cat;
-      renderSubcategoriaChips();
-      renderNotasSugeridas();
-    });
-  });
+  cont.innerHTML = unicas.map(c => htmlCatChip(c.categoria, c.categoriaIcono)).join('');
 
   if (unicas.length) {
     cont.querySelector('.cat-chip').classList.add('active');
@@ -411,21 +509,45 @@ function renderCategoriaChips() {
   renderNotasSugeridas();
 }
 
-function seleccionarCategoria(cat, sub) {
-  const catBtn = [...document.querySelectorAll('.cat-chip')].find(b => b.dataset.cat === cat);
-  if (!catBtn) return;
-  document.querySelectorAll('.cat-chip').forEach(b => b.classList.remove('active'));
-  catBtn.classList.add('active');
+function activarCategoria(cat) {
+  document.querySelectorAll('.cat-chip').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
   estado.categoria = cat;
   renderSubcategoriaChips();
   renderNotasSugeridas();
+}
+
+// un solo listener por grupo de chips (delegación), así los chips agregados al editar también responden
+$('categoriaChips').addEventListener('click', (e) => {
+  const btn = e.target.closest('.cat-chip');
+  if (btn) activarCategoria(btn.dataset.cat);
+});
+$('subcategoriaChips').addEventListener('click', (e) => {
+  const btn = e.target.closest('.chip');
+  if (!btn) return;
+  document.querySelectorAll('#subcategoriaChips .chip').forEach(b => b.classList.toggle('active', b === btn));
+  estado.subcategoria = btn.dataset.sub;
+});
+
+// Al editar: deja el movimiento exactamente como estaba. Si su categoría, subcategoría o
+// medio ya no existen en la taxonomía, se muestran como chip extra; y si no tenía
+// subcategoría, no se le inventa una.
+function seleccionarCategoria(cat, sub) {
+  const cont = $('categoriaChips');
+  if (![...cont.querySelectorAll('.cat-chip')].some(b => b.dataset.cat === cat)) {
+    cont.insertAdjacentHTML('beforeend', htmlCatChip(cat, '🏷️'));
+  }
+  activarCategoria(cat);
+
+  const subCont = $('subcategoriaChips');
   if (sub) {
-    const subBtn = [...document.querySelectorAll('#subcategoriaChips .chip')].find(b => b.dataset.sub === sub);
-    if (subBtn) {
-      document.querySelectorAll('#subcategoriaChips .chip').forEach(b => b.classList.remove('active'));
-      subBtn.classList.add('active');
-      estado.subcategoria = sub;
+    if (![...subCont.querySelectorAll('.chip')].some(b => b.dataset.sub === sub)) {
+      subCont.insertAdjacentHTML('beforeend', `<button type="button" class="chip" data-sub="${esc(sub)}">🏷️ ${esc(sub)}</button>`);
     }
+    subCont.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b.dataset.sub === sub));
+    estado.subcategoria = sub;
+  } else {
+    subCont.querySelectorAll('.chip').forEach(b => b.classList.remove('active'));
+    estado.subcategoria = '';
   }
 }
 
@@ -440,41 +562,34 @@ function renderSubcategoriaChips() {
   }
 
   const sugerida = subcategoriaSugerida(estado.categoria);
+  const activa = subs.some(s => s.subcategoria === sugerida) ? sugerida : subs[0].subcategoria;
   cont.innerHTML = subs.map(s =>
-    `<button type="button" class="chip${s.subcategoria === sugerida ? ' active' : ''}" data-sub="${s.subcategoria}">${s.subcategoriaIcono || ''} ${s.subcategoria}</button>`
+    `<button type="button" class="chip${s.subcategoria === activa ? ' active' : ''}" data-sub="${esc(s.subcategoria)}">${s.subcategoriaIcono || ''} ${esc(s.subcategoria)}</button>`
   ).join('');
-  estado.subcategoria = subs.some(s => s.subcategoria === sugerida) ? sugerida : subs[0].subcategoria;
-  if (!subs.some(s => s.subcategoria === sugerida)) cont.querySelector('.chip').classList.add('active');
-
-  cont.querySelectorAll('.chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      cont.querySelectorAll('.chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      estado.subcategoria = btn.dataset.sub;
-    });
-  });
+  estado.subcategoria = activa;
 }
 
 // notas usadas antes en esta categoría, para no tipear "Coles" por centésima vez
 function renderNotasSugeridas() {
+  if (!estado.categoria) { $('notasSugeridas').innerHTML = ''; return; }
   const vistas = new Set();
   const notas = [];
   for (const m of movimientos) {
     if (m.categoria !== estado.categoria || !m.nota) continue;
-    const n = m.nota.trim();
+    const n = String(m.nota).trim();
     const k = sinAcentos(n);
     if (!k || vistas.has(k)) continue;
     vistas.add(k);
     notas.push(n);
     if (notas.length >= 12) break;
   }
-  $('notasSugeridas').innerHTML = notas.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join('');
+  $('notasSugeridas').innerHTML = notas.map(n => `<option value="${esc(n)}">`).join('');
 }
 
 // ---------- Guardar movimiento ----------
 function leerFormulario() {
   return {
-    fecha: $('fecha').value || fechaLocalStr(new Date()),
+    fecha: fechaValida($('fecha').value) ? $('fecha').value : '',
     tipo: estado.tipo,
     monto: montoNumerico($('monto')),
     moneda: estado.moneda,
@@ -489,41 +604,40 @@ function leerFormulario() {
   };
 }
 
-$('guardarBtn').addEventListener('click', async () => {
+$('guardarBtn').addEventListener('click', () => {
   const mov = leerFormulario();
   if (!isFinite(mov.monto) || mov.monto <= 0) { toast('Poné un monto válido'); return; }
-  if (!apiUrl()) { toast('Primero configurá la URL del Apps Script (⚙️)'); return; }
+  if (!mov.fecha) { toast('La fecha no es válida: elegila con "Otra 📅"'); return; }
+  if (!apiUrl()) { toast('Primero configurá la conexión con tu planilla (⚙️)'); return; }
   if (mov.tipo === 'Transferencia') {
     if (mov.moneda === mov.monedaDestino && mov.medioPago === mov.medioPagoDestino) { toast('La cuenta de origen y destino no pueden ser la misma'); return; }
     if (!isFinite(mov.montoRecibido) || mov.montoRecibido <= 0) mov.montoRecibido = mov.moneda === mov.monedaDestino ? mov.monto : mov.montoRecibido;
     if (!isFinite(mov.montoRecibido) || mov.montoRecibido <= 0) { toast('Poné el monto recibido en la cuenta destino'); return; }
   }
 
-  const btn = $('guardarBtn');
-  btn.disabled = true;
-  btn.textContent = 'Guardando…';
-
-  if (editandoId) {
-    await guardarEdicion(editandoId, mov);
-  } else {
+  try {
+    if (editandoId) {
+      guardarEdicion(editandoId, mov);
+      return;
+    }
     if (ligando && mov.tipo === 'Gasto') mov.grupo = ligando.grupo;
-    const guardado = await enviarMovimiento({ ...mov, id: nuevoId() });
+    const guardado = enviarMovimiento({ ...mov, id: nuevoId() });
     $('monto').value = '';
     $('montoRecibido').value = '';
     $('nota').value = '';
     $('calcHint').textContent = '';
     $('tasaHint').textContent = '';
-    if (guardado && guardado.tipo === 'Gasto') {
+    if (guardado.tipo === 'Gasto') {
       ultimoGuardado = guardado;
       mostrarLigarRow(guardado);
-      if (ligando) { $('monto').focus(); }
     } else {
       ocultarLigarRow();
     }
+    $('monto').focus();
+  } catch (err) {
+    vibrar([40, 60, 40]);
+    toast(`No pude guardar: ${err.message}`, 6000);
   }
-
-  btn.disabled = false;
-  btn.textContent = editandoId ? 'Guardar cambios' : 'Guardar';
 });
 
 // ---------- Ligar cargos (un gasto que sale como varios cargos en la tarjeta) ----------
@@ -558,20 +672,23 @@ function cancelarLigar() {
 
 // ---------- Edición ----------
 $('cancelarEdicionBtn').addEventListener('click', cancelarEdicion);
-$('duplicarBtn').addEventListener('click', async () => {
+$('duplicarBtn').addEventListener('click', () => {
   const original = movimientos.find(m => m.id === editandoId);
   if (!original) return;
   const copia = { ...original, id: nuevoId(), fecha: fechaLocalStr(new Date()), grupo: '' };
   delete copia.pendiente;
   delete copia.timestamp;
   cancelarEdicion();
-  await enviarMovimiento(copia);
+  try {
+    enviarMovimiento(copia);
+  } catch (err) {
+    toast(`No pude duplicar: ${err.message}`, 6000);
+  }
 });
-$('borrarEdicionBtn').addEventListener('click', async () => {
+$('borrarEdicionBtn').addEventListener('click', () => {
   const id = editandoId;
   if (!id) return;
-  const ok = await borrarMovimiento(id);
-  if (ok) cancelarEdicion();
+  if (borrarMovimiento(id)) cancelarEdicion();
 });
 
 function resetFormularioCargar() {
@@ -584,6 +701,7 @@ function resetFormularioCargar() {
   $('fecha').classList.add('oculto');
   document.querySelector('#fechaChips .chip[data-dias="0"]').classList.add('active');
   $('fecha').value = fechaLocalStr(new Date());
+  actualizarFechaHint();
   aplicarTipo('Gasto');
   renderCategoriaChips();
   $('bannerEdicion').classList.add('oculto');
@@ -605,7 +723,9 @@ function abrirEdicion(mov) {
   document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
   $('chipOtraFecha').classList.add('active');
   $('fecha').classList.remove('oculto');
-  $('fecha').value = soloFecha(mov.fecha);
+  const f = soloFecha(mov.fecha);
+  $('fecha').value = fechaValida(f) ? f : ''; // una fecha rota en la planilla no se reemplaza por "hoy" en silencio
+  actualizarFechaHint();
 
   estado.moneda = mov.moneda;
   $('moneda').value = mov.moneda;
@@ -620,7 +740,7 @@ function abrirEdicion(mov) {
     $('montoRecibido').value = mov.montoRecibido || '';
   } else {
     renderCategoriaChips();
-    if (mov.categoria) seleccionarCategoria(mov.categoria, mov.subcategoria);
+    if (mov.categoria) seleccionarCategoria(mov.categoria, mov.subcategoria || '');
   }
 
   $('monto').value = mov.monto;
@@ -633,42 +753,170 @@ function abrirEdicion(mov) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-async function guardarEdicion(id, mov) {
+function guardarEdicion(id, mov) {
   const idx = movimientos.findIndex(m => m.id === id);
   if (idx === -1) { toast('No encuentro ese movimiento'); editandoId = null; resetFormularioCargar(); return; }
   const actual = movimientos[idx];
-  const editado = { ...actual, ...mov, grupo: actual.grupo || '' };
+  const editado = { ...actual, ...mov, grupo: actual.grupo || '', pendiente: true };
 
-  if (actual.pendiente) {
-    // todavía no llegó al servidor: actualizamos la copia en la cola y listo
-    const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]');
-    const i = cola.findIndex(c => c.id === id);
-    if (i !== -1) cola[i] = { ...cola[i], ...mov };
-    localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
-    movimientos[idx] = editado;
-    despuesDeCambiar();
-    toast('Cambios guardados (se sincronizan cuando haya señal)');
-    editandoId = null;
-    resetFormularioCargar();
-    return;
+  // si el alta de este movimiento todavía no salió del celu, se corrige ahí mismo;
+  // si ya se intentó mandar (puede estar en la planilla), va como edición aparte
+  const cola = leerCola();
+  const alta = cola.find(o => o.op === 'alta' && o.id === id && !o.intentos);
+  if (alta) {
+    alta.mov = { ...alta.mov, ...mov, grupo: alta.mov.grupo || '' };
+    escribirCola(cola);
+  } else {
+    encolarOp({ op: 'editar', id, mov: editado });
   }
 
-  try {
-    await apiPost({ action: 'editar', id, ...editado });
-    movimientos[idx] = editado;
-    despuesDeCambiar();
-    toast('Cambios guardados 🥭');
-    editandoId = null;
-    resetFormularioCargar();
-  } catch (err) {
-    toast('No se pudo editar: revisá tu conexión y volvé a tocar "Guardar cambios"');
+  movimientos[idx] = editado;
+  indiceBusqueda.delete(id);
+  despuesDeCambiar(esMigrado(editado));
+  vibrar(15);
+  toast('Cambios guardados');
+  editandoId = null;
+  resetFormularioCargar();
+  sincronizarCola();
+}
+
+// ---------- Cola de operaciones ----------
+// Todo lo que cambia datos se anota ACÁ primero y recién después se manda a la planilla.
+// Si se corta la señal o se cierra la app a mitad de camino, la operación sigue en el celu
+// y se reintenta sola. Entrada: { uid, op: 'alta'|'editar'|'borrar'|'config', id?, mov?, clave?, valor?, intentos }
+function leerCola() {
+  let cola;
+  try { cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]'); } catch (err) { cola = []; }
+  // formato viejo: el movimiento suelto era un alta
+  return cola.map(e => e.op ? e : { uid: 'legacy-' + e.id, op: 'alta', id: e.id, mov: e, intentos: 0 });
+}
+
+function escribirCola(cola) {
+  guardarLS(LS_QUEUE, JSON.stringify(cola, sinInternos));
+  actualizarPill();
+}
+
+function encolarOp(op) {
+  const cola = leerCola();
+  cola.push({ uid: nuevoId(), intentos: 0, ...op });
+  escribirCola(cola);
+}
+
+// la lista local = lo que dice la planilla + lo que todavía no le llegó
+function aplicarCola(lista) {
+  const cola = leerCola();
+  if (!cola.length) return lista;
+  const porId = new Map(lista.map(m => [m.id, m]));
+  cola.forEach(op => {
+    if (op.op === 'alta') {
+      porId.set(op.id, { ...(porId.get(op.id) || {}), ...op.mov, pendiente: true });
+    } else if (op.op === 'editar') {
+      const base = porId.get(op.id);
+      if (base) porId.set(op.id, { ...base, ...op.mov, pendiente: true });
+    } else if (op.op === 'borrar') {
+      porId.delete(op.id);
+    }
+  });
+  return [...porId.values()];
+}
+
+function ejecutarOp(op) {
+  if (op.op === 'alta') return apiPost(op.mov);
+  if (op.op === 'editar') return apiPost({ action: 'editar', ...op.mov, id: op.id });
+  if (op.op === 'borrar') return apiPost({ action: 'borrar', id: op.id });
+  if (op.op === 'config') return apiPost({ action: 'config', clave: op.clave, valor: op.valor });
+  return Promise.reject(new ApiError('operación desconocida: ' + op.op));
+}
+
+function confirmarOp(op, resp) {
+  ultimaConfirmacion = Date.now();
+  if (resp && resp.historialVersion) localStorage.setItem(LS_HIST_VER, String(resp.historialVersion));
+  if (op.op === 'alta' || op.op === 'editar') {
+    const quedanDelId = leerCola().some(o => o.id === op.id);
+    if (!quedanDelId) {
+      const m = movimientos.find(x => x.id === op.id);
+      if (m) delete m.pendiente;
+      document.querySelectorAll(`.gasto-item[data-id="${CSS.escape(op.id)}"] .badge-pendiente`).forEach(b => b.remove());
+    }
+    guardarCacheMovimientos(String(op.id).startsWith('mig-'));
   }
 }
 
-// ---------- Alta / cola offline ----------
-function despuesDeCambiar() {
-  movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-  guardarCacheMovimientos();
+// Sube la cola de a una operación, en orden. Un solo sincronizador a la vez, y la cola
+// se relee en cada paso: lo que se encole mientras tanto no se pierde.
+async function sincronizarCola() {
+  if (sincronizando || !apiUrl()) return;
+  sincronizando = true;
+  actualizarPill();
+  try {
+    for (let paso = 0; paso < 500; paso++) {
+      const cola = leerCola();
+      const op = cola.find(o => !o.bloqueada);
+      if (!op) break;
+
+      // se anota el intento ANTES de mandar: si la respuesta se pierde, sabemos que pudo haber llegado
+      op.intentos = (op.intentos || 0) + 1;
+      escribirCola(cola);
+
+      let resp;
+      try {
+        resp = await ejecutarOp(op);
+      } catch (err) {
+        if (esErrorDeRed(err)) break; // sin señal: queda para la próxima
+        errorSync = err.message;
+        const actual = leerCola();
+        const o = actual.find(x => x.uid === op.uid);
+        if (o) {
+          o.error = err.message;
+          // una operación que la planilla rechaza tres veces se aparta para no trabar el resto
+          if (err.message !== 'no autorizado' && o.intentos >= 3) o.bloqueada = true;
+          escribirCola(actual);
+        }
+        if (err.message === 'no autorizado' || !o || !o.bloqueada) break;
+        continue;
+      }
+      errorSync = '';
+      escribirCola(leerCola().filter(o => o.uid !== op.uid));
+      confirmarOp(op, resp);
+    }
+  } finally {
+    sincronizando = false;
+    actualizarPill();
+  }
+}
+
+function actualizarPill() {
+  const pill = $('syncPill');
+  const cola = leerCola();
+  if (sincronizando && cola.length) {
+    pill.textContent = `⏫ Subiendo ${cola.length}…`;
+    pill.className = 'sync-pill subiendo';
+    pill.hidden = false;
+    return;
+  }
+  if (!cola.length) { pill.hidden = true; return; }
+  const bloqueadas = cola.filter(o => o.bloqueada).length;
+  pill.textContent = errorSync ? `⚠️ ${cola.length} sin subir` : `${cola.length} sin subir`;
+  pill.title = errorSync ? `La planilla respondió: ${errorSync}` : 'Tocá para reintentar';
+  pill.className = 'sync-pill' + (errorSync || bloqueadas ? ' error' : '');
+  pill.hidden = false;
+}
+
+// ---------- Alta ----------
+function ordenar() {
+  movimientos.sort((a, b) => {
+    const fa = soloFecha(a.fecha);
+    const fb = soloFecha(b.fecha);
+    if (fa !== fb) return fa < fb ? 1 : -1;
+    const ta = a.timestamp || '';
+    const tb = b.timestamp || '';
+    return ta < tb ? 1 : (ta > tb ? -1 : 0);
+  });
+}
+
+function despuesDeCambiar(incluirMigrados = false) {
+  ordenar();
+  guardarCacheMovimientos(incluirMigrados);
   movSucio = true;
   poblarFiltroMeses();
   renderUltimos();
@@ -681,51 +929,32 @@ function agregarLocal(mov) {
   despuesDeCambiar();
 }
 
-async function enviarMovimiento(mov) {
-  try {
-    await apiPost(mov);
-    agregarLocal(mov);
-    toast('¡Listo! Movimiento guardado 🥭');
-    return mov;
-  } catch (err) {
-    encolar(mov);
-    toast('Sin conexión: se guardó localmente y se sincroniza después');
-    return mov;
-  }
-}
-
-function encolar(mov) {
-  const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]');
-  cola.push(mov);
-  localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
-  agregarLocal({ ...mov, pendiente: true });
-}
-
-async function sincronizarCola() {
-  const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]');
-  if (!cola.length || !apiUrl()) return;
-  const restante = [];
-  for (const mov of cola) {
-    try {
-      await apiPost(mov); // el id viaja con el movimiento: si ya existe, el servidor lo actualiza en vez de duplicar
-      const idx = movimientos.findIndex(m => m.id === mov.id);
-      if (idx !== -1) delete movimientos[idx].pendiente;
-    } catch (err) {
-      restante.push(mov);
-    }
-  }
-  localStorage.setItem(LS_QUEUE, JSON.stringify(restante));
-  guardarCacheMovimientos();
-  if (restante.length < cola.length) { movSucio = true; renderUltimos(); if (vistaActiva() === 'movimientos') renderMovimientos(); }
+// Primero en el celu, después en la planilla. El botón vuelve a estar libre al instante.
+function enviarMovimiento(mov) {
+  const completo = { ...mov, timestamp: tsLocal() };
+  encolarOp({ op: 'alta', id: completo.id, mov: completo });
+  agregarLocal({ ...completo, pendiente: true });
+  vibrar(15);
+  toast(navigator.onLine === false ? 'Guardado en el celu; se sube cuando haya señal' : 'Guardado 🥭', 1800);
+  sincronizarCola();
+  return completo;
 }
 
 // ---------- Carga inicial ----------
-// El historial migrado (miles de filas) no cambia nunca, así que se trae una única vez y se cachea
-// para siempre. En cada apertura solo se pide lo "reciente" (lo que vos vas cargando) junto con
+// El historial migrado (miles de filas) casi no cambia, así que se trae una única vez y se cachea.
+// En cada apertura solo se pide lo "reciente" (lo que vos vas cargando) junto con
 // categorías y config, todo en UNA llamada (bootstrap).
+function migradosLocales() {
+  if (migradosMem) return migradosMem;
+  const s = localStorage.getItem(LS_CACHE_MIGRADOS);
+  try { migradosMem = s ? JSON.parse(s) : []; } catch (err) { migradosMem = []; }
+  return migradosMem;
+}
+
 function combinar(recientes, migrados) {
-  movimientos = [...recientes, ...migrados];
-  movimientos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+  movimientos = aplicarCola([...recientes, ...migrados]);
+  indiceBusqueda.clear();
+  ordenar();
   movSucio = true;
   poblarFiltroMeses();
   renderUltimos();
@@ -739,19 +968,30 @@ function aplicarCategorias(data) {
   if (fresca !== JSON.stringify(categorias)) {
     categorias = JSON.parse(fresca);
     localStorage.setItem(LS_CACHE_CAT, fresca);
-    renderCategoriaChips();
+    if (!editandoId) renderCategoriaChips();
   }
 }
 
 function aplicarConfig(data) {
   config = data || {};
+  // una clave que todavía no subió manda sobre lo que dice la planilla
+  leerCola().filter(o => o.op === 'config').forEach(o => { config[o.clave] = o.valor; });
   localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
   patrimonio = Number(config.patrimonioInvertido) || 0;
+  if (vistaActiva() === 'activos') renderActivos();
+}
+
+// escritura de Config (ancla de saldo, patrimonio) con la misma cola que los movimientos
+function guardarConfig(clave, valor) {
+  config[clave] = valor;
+  localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
+  escribirCola(leerCola().filter(o => !(o.op === 'config' && o.clave === clave))); // la última escritura de la clave gana
+  encolarOp({ op: 'config', clave, valor });
+  sincronizarCola();
 }
 
 // Baja el historial completo por tandas. De una sola vez, 2800 filas por Apps Script
-// se pasaban del timeout y quedaba silenciosamente sin historial (por eso en la PC
-// no aparecía nada). Cada tanda lee solo su rango de filas en la planilla.
+// se pasaban del timeout y quedaba silenciosamente sin historial. Cada tanda lee solo su rango.
 async function descargarHistorial(totalEsperado) {
   const migrados = [];
   let desde = 0;
@@ -771,21 +1011,22 @@ async function descargarHistorial(totalEsperado) {
     filas.filter(esMigrado).forEach(m => migrados.push(m));
     desde += filas.length;
     if (!filas.length || desde >= total) break;
-    toast(`Bajando historial… ${desde} de ${total}`, 60000);
+    toast(`Bajando tu historial… ${desde} de ${total}`, 60000);
   }
 
-  localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
-  localStorage.setItem(LS_CACHE_TOTAL, String(total));
-  const recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]');
+  guardarLS(LS_CACHE_MIGRADOS, JSON.stringify(migrados, sinInternos));
+  migradosMem = migrados;
+  let recientesActuales = [];
+  try { recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]'); } catch (err) { /* cache roto: se rehace */ }
   combinar(recientesActuales, migrados);
   return migrados.length;
 }
 
 async function cargarTodo() {
   const cachedRecientes = localStorage.getItem(LS_CACHE_RECIENTES);
-  const cachedMigrados = localStorage.getItem(LS_CACHE_MIGRADOS);
-  const migradosIniciales = cachedMigrados ? JSON.parse(cachedMigrados) : [];
+  const hayMigradosCacheados = localStorage.getItem(LS_CACHE_MIGRADOS) !== null;
   ultimaSync = Date.now();
+  const inicio = Date.now();
   let totalServidor = 0;
   let recientesServidor = null;
 
@@ -804,21 +1045,34 @@ async function cargarTodo() {
     aplicarConfig(data.config);
     recientesServidor = data.recientes || [];
     totalServidor = Number(data.total) || 0;
-    localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(recientesServidor));
-    combinar(recientesServidor, migradosIniciales);
+
+    if (ultimaConfirmacion > inicio) {
+      // mientras esperábamos, la planilla confirmó algo de la cola: esta foto ya es vieja y
+      // pisaría lo recién confirmado. La próxima sincronización la trae bien.
+    } else {
+      const str = JSON.stringify(recientesServidor);
+      if (str !== cachedRecientes) { // si no cambió nada, no se vuelve a ordenar ni a pintar
+        guardarLS(LS_CACHE_RECIENTES, str);
+        combinar(recientesServidor, migradosLocales());
+      }
+    }
   } catch (err) {
-    if (!cachedRecientes && !cachedMigrados) toast('No pude conectar con tu planilla. Revisá la URL en ⚙️');
+    if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
+    else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Revisá la URL en ⚙️');
     return; // sin red no tiene sentido seguir; queda lo cacheado
   }
 
-  // el historial se vuelve a bajar si falta, o si las cuentas no cierran contra la
-  // planilla (algo se agregó o borró desde otro dispositivo)
-  const localTotal = (recientesServidor || []).length + migradosIniciales.length;
-  const desincronizado = totalServidor > 0 && localTotal !== totalServidor;
-  if (!cachedMigrados || desincronizado) {
+  // el historial se vuelve a bajar si falta, si las cuentas no cierran contra la planilla
+  // (algo se agregó o borró desde otro dispositivo) o si se editó una fila vieja en otro lado
+  const localTotal = recientesServidor.length + migradosLocales().length;
+  const verServidor = String(config.historialVersion || '');
+  const verLocal = localStorage.getItem(LS_HIST_VER) || '';
+  const desincronizado = (totalServidor > 0 && localTotal !== totalServidor) || verServidor !== verLocal;
+  if (!hayMigradosCacheados || desincronizado) {
     try {
       const n = await descargarHistorial(totalServidor);
-      toast(cachedMigrados ? 'Datos sincronizados' : `Historial listo: ${n} movimientos`);
+      localStorage.setItem(LS_HIST_VER, verServidor);
+      toast(hayMigradosCacheados ? 'Datos sincronizados' : `Historial listo: ${n} movimientos`);
     } catch (err) {
       toast('No pude bajar todo el historial. Probá de nuevo con mejor señal.');
     }
@@ -831,17 +1085,22 @@ async function cargarTodo() {
 // así lo que cargaste en el otro dispositivo aparece sin tener que tocar nada.
 function refrescarSiHaceFalta() {
   if (document.visibilityState !== 'visible' || !apiUrl()) return;
+  refrescarFechaChip();
+  sincronizarCola();
   if (Date.now() - ultimaSync < 45000) return;
   cargarTodo();
 }
 document.addEventListener('visibilitychange', refrescarSiHaceFalta);
 window.addEventListener('focus', refrescarSiHaceFalta);
 
-function guardarCacheMovimientos() {
-  const migrados = movimientos.filter(esMigrado);
+// el historial migrado solo se reescribe cuando se tocó una de sus filas (casi nunca)
+function guardarCacheMovimientos(incluirMigrados = false) {
   const recientes = movimientos.filter(m => !esMigrado(m));
-  localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
-  localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(recientes));
+  guardarLS(LS_CACHE_RECIENTES, JSON.stringify(recientes, sinInternos));
+  if (incluirMigrados) {
+    migradosMem = movimientos.filter(esMigrado);
+    guardarLS(LS_CACHE_MIGRADOS, JSON.stringify(migradosMem, sinInternos));
+  }
 }
 
 // ---------- Render de listas ----------
@@ -876,12 +1135,12 @@ function htmlFila(m, extra = '') {
     ? `${m.moneda} ${m.medioPago} → ${m.monedaDestino} ${m.medioPagoDestino}`
     : `${m.moneda} ${m.medioPago || ''}`;
   return `
-    <div class="gasto-item ${extra}" data-id="${m.id}">
+    <div class="gasto-item ${extra}" data-id="${esc(m.id)}">
       <div class="gasto-info">
         <div class="gasto-ico">${iconoDe(m)}</div>
         <div class="gasto-texto">
-          <div class="cat">${nombreMov(m)}${m.pendiente ? '<span class="badge-pendiente">pendiente</span>' : ''}</div>
-          <div class="meta">${soloFecha(m.fecha)} · ${cuentaTxt}${m.nota ? ' · ' + m.nota : ''}</div>
+          <div class="cat">${esc(nombreMov(m))}${m.pendiente ? '<span class="badge-pendiente" title="Todavía no llegó a la planilla">pendiente</span>' : ''}</div>
+          <div class="meta">${esc(soloFecha(m.fecha))} · ${esc(cuentaTxt)}${m.nota ? ' · ' + esc(m.nota) : ''}</div>
         </div>
       </div>
       <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${fmt(m.monto, m.moneda)}</div>
@@ -895,18 +1154,18 @@ function htmlGrupo(g) {
   const abierto = gruposAbiertos.has(g.grupo);
   const notas = [...new Set(g.miembros.map(m => m.nota).filter(Boolean))].join(' + ');
   return `
-    <div class="gasto-item grupo-item${abierto ? ' abierto' : ''}" data-grupo="${g.grupo}">
+    <div class="gasto-item grupo-item${abierto ? ' abierto' : ''}" data-grupo="${esc(g.grupo)}">
       <div class="gasto-info">
         <div class="gasto-ico">${iconoDe(base)}</div>
         <div class="gasto-texto">
-          <div class="cat">${nombreMov(base)} <span class="badge-grupo">${g.miembros.length} cargos</span></div>
-          <div class="meta">${soloFecha(base.fecha)} · ${base.moneda} ${base.medioPago || ''}${notas ? ' · ' + notas : ''}</div>
+          <div class="cat">${esc(nombreMov(base))} <span class="badge-grupo">${g.miembros.length} cargos</span></div>
+          <div class="meta">${esc(soloFecha(base.fecha))} · ${esc(base.moneda)} ${esc(base.medioPago || '')}${notas ? ' · ' + esc(notas) : ''}</div>
         </div>
       </div>
       <div class="gasto-monto ${(base.tipo || 'Gasto').toLowerCase()}">${fmt(total, base.moneda)}</div>
       <span class="grupo-flecha">${abierto ? '▾' : '▸'}</span>
     </div>
-    <div class="grupo-miembros${abierto ? '' : ' oculto'}" data-grupo-de="${g.grupo}">
+    <div class="grupo-miembros${abierto ? '' : ' oculto'}" data-grupo-de="${esc(g.grupo)}">
       ${g.miembros.map(m => htmlFila(m, 'miembro')).join('')}
     </div>`;
 }
@@ -970,8 +1229,21 @@ function poblarFiltroMeses() {
 
 ['filtroTipo', 'filtroMoneda'].forEach(id => $(id).addEventListener('change', () => { limiteRender = PAGINA; movSucio = true; renderMovimientos(); }));
 $('filtroMes').addEventListener('change', () => { $('filtroMes').dataset.tocado = '1'; limiteRender = PAGINA; movSucio = true; renderMovimientos(); });
-$('buscar').addEventListener('input', () => { limiteRender = PAGINA; movSucio = true; renderMovimientos(); });
-$('mostrarMasBtn').addEventListener('click', () => { limiteRender += 200; movSucio = true; renderMovimientos(); });
+let tBuscar = null;
+$('buscar').addEventListener('input', () => {
+  clearTimeout(tBuscar);
+  tBuscar = setTimeout(() => { limiteRender = PAGINA; movSucio = true; renderMovimientos(); }, 150);
+});
+$('mostrarMasBtn').addEventListener('click', () => { limiteRender += 200; renderMovimientos(true); });
+
+function textoBusqueda(m) {
+  let t = indiceBusqueda.get(m.id);
+  if (t === undefined) {
+    t = sinAcentos(`${m.nota} ${m.categoria} ${m.subcategoria}`);
+    indiceBusqueda.set(m.id, t);
+  }
+  return t;
+}
 
 function filtrarMovimientos() {
   const filtroTipo = $('filtroTipo').value;
@@ -982,43 +1254,53 @@ function filtrarMovimientos() {
     (!filtroTipo || m.tipo === filtroTipo) &&
     (!filtroMoneda || m.moneda === filtroMoneda) &&
     (q || !filtroMes || mesDe(m.fecha) === filtroMes) && // si buscás, la búsqueda manda sobre el mes
-    (!q || sinAcentos(`${m.nota} ${m.categoria} ${m.subcategoria}`).includes(q))
+    (!q || textoBusqueda(m).includes(q))
   );
 }
 
-function renderMovimientos() {
-  if (!movSucio) return;
-  movSucio = false;
+// "Mostrar más" agrega solo las filas nuevas al final, sin reconstruir la lista entera
+let entradasRender = [];
+let yaRenderizadas = 0;
+let ultimoMesRender = null;
 
-  const filtrados = filtrarMovimientos();
-  renderTotales(filtrados);
-
+function renderMovimientos(soloAgregar = false) {
+  if (!soloAgregar && !movSucio) return;
   const cont = $('listaMovimientos');
-  if (!filtrados.length) {
-    const hayOtros = movimientos.length > 0;
-    cont.innerHTML = hayOtros
-      ? `<div class="vacio">No hay movimientos con estos filtros<br><button type="button" class="link-btn" id="verTodoBtn">Ver todos</button></div>`
-      : '<div class="vacio">Todavía no hay movimientos acá</div>';
-    $('mostrarMasBtn').classList.add('oculto');
-    return;
+
+  if (!soloAgregar) {
+    movSucio = false;
+    const filtrados = filtrarMovimientos();
+    renderTotales(filtrados);
+    entradasRender = agruparMovimientos(filtrados);
+    yaRenderizadas = 0;
+    ultimoMesRender = null;
+    cont.innerHTML = '';
+
+    if (!entradasRender.length) {
+      const hayOtros = movimientos.length > 0;
+      cont.innerHTML = hayOtros
+        ? `<div class="vacio">No hay movimientos con estos filtros<br><button type="button" class="link-btn" id="verTodoBtn">Ver todos</button></div>`
+        : '<div class="vacio">Todavía no hay movimientos acá</div>';
+      $('mostrarMasBtn').classList.add('oculto');
+      return;
+    }
   }
 
-  const entradas = agruparMovimientos(filtrados);
-  const visibles = entradas.slice(0, limiteRender);
+  const nuevas = entradasRender.slice(yaRenderizadas, limiteRender);
   let html = '';
-  let mesActual = null;
-  visibles.forEach(e => {
+  nuevas.forEach(e => {
     const base = e.mov || e.miembros[0];
     const mes = mesDe(base.fecha);
-    if (mes !== mesActual) {
+    if (mes !== ultimoMesRender) {
       html += `<div class="mes-header">${nombreMes(mes)}</div>`;
-      mesActual = mes;
+      ultimoMesRender = mes;
     }
     html += e.mov ? htmlFila(e.mov) : htmlGrupo(e);
   });
-  cont.innerHTML = html;
-  $('mostrarMasBtn').classList.toggle('oculto', entradas.length <= limiteRender);
-  $('mostrarMasBtn').textContent = `Mostrar más (${entradas.length - visibles.length} restantes)`;
+  cont.insertAdjacentHTML('beforeend', html);
+  yaRenderizadas = Math.min(limiteRender, entradasRender.length);
+  $('mostrarMasBtn').classList.toggle('oculto', entradasRender.length <= yaRenderizadas);
+  $('mostrarMasBtn').textContent = `Mostrar más (${entradasRender.length - yaRenderizadas} restantes)`;
 }
 
 function renderTotales(lista) {
@@ -1047,44 +1329,58 @@ function toastAccion(msg, etiqueta, accion, ms) {
   el.appendChild(b);
   el.classList.add('show');
   clearTimeout(el._t);
-  const cerrar = () => { el.classList.remove('show'); el.innerHTML = ''; };
+  el._accion = true;
+  el._accionHasta = Date.now() + ms;
+  const cerrar = () => { el.classList.remove('show'); el.innerHTML = ''; el._accion = false; };
   el._t = setTimeout(cerrar, ms);
   return cerrar;
 }
 
 // Borrar sin cartel de confirmación: se saca al instante, con 5 segundos para deshacer.
-// Recién después de esos 5 segundos se le avisa al servidor.
+// Recién después se anota en la cola. Si la app se va a segundo plano antes, se anota ya
+// (si no, el timer nunca corre y el movimiento vuelve a aparecer en el próximo refresco).
+const borradosEnEspera = new Map(); // id -> { mov, timer, confirmar }
+
+function confirmarBorrado(id) {
+  const b = borradosEnEspera.get(id);
+  if (!b) return;
+  clearTimeout(b.timer);
+  borradosEnEspera.delete(id);
+  // si el alta nunca salió del celu, alcanza con descartarla; si pudo haber llegado, se pide borrar
+  const cola = leerCola();
+  const altaSinMandar = cola.some(o => o.op === 'alta' && o.id === id && !o.intentos);
+  escribirCola(cola.filter(o => !((o.op === 'alta' || o.op === 'editar') && o.id === id)));
+  if (!altaSinMandar) encolarOp({ op: 'borrar', id });
+  sincronizarCola();
+}
+
 function borrarMovimiento(id) {
   const idx = movimientos.findIndex(m => m.id === id);
   if (idx === -1) return false;
   const mov = movimientos[idx];
   movimientos.splice(idx, 1);
-  despuesDeCambiar();
+  indiceBusqueda.delete(id);
+  despuesDeCambiar(esMigrado(mov));
 
-  let deshecho = false;
+  const timer = setTimeout(() => confirmarBorrado(id), 5200);
+  borradosEnEspera.set(id, { mov, timer });
+
   toastAccion(`Borrado: ${nombreMov(mov)} ${fmt(mov.monto, mov.moneda)}`, 'Deshacer', () => {
-    deshecho = true;
+    const b = borradosEnEspera.get(id);
+    if (!b) return;
+    clearTimeout(b.timer);
+    borradosEnEspera.delete(id);
     movimientos.push(mov);
-    despuesDeCambiar();
+    despuesDeCambiar(esMigrado(mov));
   }, 5000);
-
-  setTimeout(async () => {
-    if (deshecho) return;
-    if (mov.pendiente) {
-      const cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]').filter(c => c.id !== id);
-      localStorage.setItem(LS_QUEUE, JSON.stringify(cola));
-      return;
-    }
-    try {
-      await apiPost({ action: 'borrar', id });
-    } catch (err) {
-      movimientos.push(mov);
-      despuesDeCambiar();
-      toast('No se pudo borrar en la planilla (sin señal). Lo volví a poner.');
-    }
-  }, 5200);
   return true;
 }
+
+function confirmarBorradosPendientes() {
+  [...borradosEnEspera.keys()].forEach(confirmarBorrado);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') confirmarBorradosPendientes(); });
+window.addEventListener('pagehide', confirmarBorradosPendientes);
 
 // ---------- Resumen (Activos) ----------
 function medioDesdeClave(moneda, medioCrudo) {
@@ -1133,7 +1429,7 @@ function renderActivos() {
   $('saldosCuentas').innerHTML = entradas.length
     ? entradas.map(([cuenta, saldo]) => {
         const moneda = cuenta.split(' ')[0];
-        return `<div class="saldo-row" data-cuenta="${cuenta}"><span>${cuenta}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo, moneda)}</b></div>`;
+        return `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo, moneda)}</b></div>`;
       }).join('')
     : '<div class="vacio">Todavía no hay movimientos</div>';
 
@@ -1184,8 +1480,8 @@ function renderResumenMes() {
           const ico = (fuenteCategorias().find(c => c.categoria === cat) || {}).categoriaIcono || '💸';
           const pct = p.gasto ? Math.round(total / p.gasto * 100) : 0;
           return `
-            <div class="barra-row" title="${cat}: ${fmt(total, moneda)} (${pct}%)">
-              <div class="barra-label"><span class="ico">${ico}</span>${cat}</div>
+            <div class="barra-row" title="${esc(cat)}: ${fmt(total, moneda)} (${pct}%)">
+              <div class="barra-label"><span class="ico">${ico}</span>${esc(cat)}</div>
               <div class="barra-pista"><div class="barra" style="width:${Math.max(2, total / max * 100)}%"></div></div>
               <div class="barra-valor">${fmtCorto(total)} <span class="barra-pct">${pct}%</span></div>
             </div>`;
@@ -1234,8 +1530,8 @@ function renderTendencia() {
     }).join('');
     return `
       <div class="tendencia-moneda">
-        <div class="tendencia-titulo">Gasto mensual en ${moneda}</div>
-        <svg viewBox="0 0 ${W} ${H}" class="tendencia-svg" role="img" aria-label="Gasto mensual en ${moneda}, últimos 6 meses">
+        <div class="tendencia-titulo">Gasto mensual en ${esc(moneda)}</div>
+        <svg viewBox="0 0 ${W} ${H}" class="tendencia-svg" role="img" aria-label="Gasto mensual en ${esc(moneda)}, últimos 6 meses">
           <line x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}" class="teje"></line>
           ${barras}
         </svg>
@@ -1255,7 +1551,7 @@ function abrirAjuste(cuenta) {
   setTimeout(() => $('ajusteInput').focus(), 50);
 }
 $('cerrarAjusteBtn').addEventListener('click', () => $('ajusteOverlay').classList.remove('active'));
-$('guardarAjusteBtn').addEventListener('click', async () => {
+$('guardarAjusteBtn').addEventListener('click', () => {
   const real = montoNumerico($('ajusteInput'));
   if (!isFinite(real)) { toast('Poné el saldo real'); return; }
   const cuenta = ajusteCuenta;
@@ -1265,32 +1561,28 @@ $('guardarAjusteBtn').addEventListener('click', async () => {
   const anclaActual = anclas[cuenta] || 0;
   const sumaMovs = (saldos[cuenta] || 0) - anclaActual;
   const nuevaAncla = Math.round((real - sumaMovs) * 100) / 100;
-  const clave = `saldoInicial_${moneda}_${medio}`;
 
-  config[clave] = nuevaAncla;
-  localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
+  try {
+    guardarConfig(`saldoInicial_${moneda}_${medio}`, nuevaAncla);
+  } catch (err) {
+    toast(`No pude guardar: ${err.message}`, 6000);
+    return;
+  }
   $('ajusteOverlay').classList.remove('active');
   renderActivos();
-  try {
-    await apiPost({ action: 'config', clave, valor: nuevaAncla });
-    toast(`Listo: ${cuenta} ahora marca ${fmt(real, moneda)}`);
-  } catch (err) {
-    toast('Se ajustó en el celu, pero no llegó a la planilla. Volvé a intentar con señal.');
-  }
+  toast(`Listo: ${cuenta} ahora marca ${fmt(real, moneda)}`);
 });
 
 // ---------- Patrimonio ----------
-$('guardarPatrimonioBtn').addEventListener('click', async () => {
+$('guardarPatrimonioBtn').addEventListener('click', () => {
   const valor = montoNumerico($('patrimonioInput'));
   const v = isFinite(valor) ? valor : 0;
   patrimonio = v;
-  config.patrimonioInvertido = v;
-  localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
   try {
-    await apiPost({ action: 'config', clave: 'patrimonioInvertido', valor: v });
+    guardarConfig('patrimonioInvertido', v);
     toast('Guardado');
   } catch (err) {
-    toast('Sin conexión: se guardó localmente');
+    toast(`No pude guardar: ${err.message}`, 6000);
   }
 });
 
@@ -1307,6 +1599,7 @@ if ('serviceWorker' in navigator) {
 function init() {
   document.body.classList.add('vista-cargar');
   $('fecha').value = fechaLocalStr(new Date());
+  actualizarFechaHint();
   $('moneda').value = estado.moneda;
   $('monedaDestino').value = estado.monedaDestino;
   renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });
@@ -1314,20 +1607,28 @@ function init() {
 
   // primero lo que ya tenemos en el celu, al instante
   const cachedCat = localStorage.getItem(LS_CACHE_CAT);
-  categorias = cachedCat ? JSON.parse(cachedCat) : CATEGORIAS_DEFAULT;
+  try { categorias = cachedCat ? JSON.parse(cachedCat) : CATEGORIAS_DEFAULT; } catch (err) { categorias = CATEGORIAS_DEFAULT; }
   const cachedConfig = localStorage.getItem(LS_CACHE_CONFIG);
-  config = cachedConfig ? JSON.parse(cachedConfig) : {};
+  try { config = cachedConfig ? JSON.parse(cachedConfig) : {}; } catch (err) { config = {}; }
   patrimonio = Number(config.patrimonioInvertido) || 0;
-  const cachedRecientes = localStorage.getItem(LS_CACHE_RECIENTES);
-  const cachedMigrados = localStorage.getItem(LS_CACHE_MIGRADOS);
-  combinar(cachedRecientes ? JSON.parse(cachedRecientes) : [], cachedMigrados ? JSON.parse(cachedMigrados) : []);
+  let recientes = [];
+  try { recientes = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]'); } catch (err) { /* cache roto: se rehace del servidor */ }
+  combinar(recientes, []);
   renderCategoriaChips();
+  actualizarPill();
+
+  // el historial (miles de filas) se parsea recién después del primer pintado, para no demorarlo
+  setTimeout(() => {
+    const mig = migradosLocales();
+    if (mig.length) combinar(recientes, mig);
+  }, 0);
 
   if (!apiUrl()) {
     $('configOverlay').classList.add('active');
     return;
   }
   cargarTodo();
+  if (!editandoId) $('monto').focus();
 }
 
 window.addEventListener('online', sincronizarCola);
