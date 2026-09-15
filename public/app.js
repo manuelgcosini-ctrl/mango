@@ -5,9 +5,12 @@ const LS_CACHE_RECIENTES = 'mango_cache_recientes';
 const LS_CACHE_MIGRADOS = 'mango_cache_migrados'; // historial migrado: no cambia, se trae una sola vez
 const LS_CACHE_CAT = 'mango_cache_categorias';
 const LS_CACHE_CONFIG = 'mango_cache_config';
+const LS_CACHE_TOTAL = 'mango_cache_total';
 
 const TIMEOUT_MS = 20000;
-const PAGINA = 120; // filas que se muestran de una en Movimientos antes de "Mostrar más"
+const TIMEOUT_LARGO = 60000;     // para bajar tandas del historial, que tardan más
+const PAGINA_HISTORIAL = 600;    // filas por tanda al bajar el historial
+const PAGINA = 120;              // filas que se muestran de una en Movimientos antes de "Mostrar más"
 
 const MEDIOS_POR_MONEDA = {
   AUD: [{ v: 'Banco', ico: '🏦' }, { v: 'Efectivo', ico: '💵' }],
@@ -71,6 +74,8 @@ let limiteRender = PAGINA;
 let mesResumen = null;       // YYYY-MM que muestra Resumen
 let ajusteCuenta = null;     // cuenta que se está ajustando en Resumen
 let gruposAbiertos = new Set();
+let ultimaSync = 0;          // cuándo se refrescó contra la planilla por última vez
+let campoMonto = null;       // último campo de monto enfocado (para los botones + − × ÷)
 
 let estado = {
   tipo: 'Gasto',
@@ -144,11 +149,11 @@ function esMigrado(m) { return !!(m.id && String(m.id).startsWith('mig-')); }
 function claveGrupo(m) { return m.grupo || m.id; }
 
 // ---------- Red ----------
-async function apiGet(params) {
+async function apiGet(params, timeoutMs = TIMEOUT_MS) {
   const q = new URLSearchParams(params);
   if (token()) q.set('token', token());
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(apiUrl() + '?' + q.toString(), { signal: ctrl.signal });
     const data = await res.json();
@@ -220,6 +225,32 @@ $('monto').addEventListener('input', (e) => {
 });
 $('montoRecibido').addEventListener('input', actualizarTasaHint);
 
+['monto', 'montoRecibido'].forEach(id => {
+  $(id).addEventListener('focus', () => { campoMonto = $(id); });
+});
+
+// insertan el operador donde está el cursor, sin perder el foco ni el teclado numérico
+$('opsMonto').addEventListener('pointerdown', (e) => e.preventDefault());
+$('opsMonto').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const enTransferencia = estado.tipo === 'Transferencia';
+  const input = (campoMonto && (campoMonto.id !== 'montoRecibido' || enTransferencia)) ? campoMonto : $('monto');
+  const ini = input.selectionStart ?? input.value.length;
+  const fin = input.selectionEnd ?? input.value.length;
+
+  if (btn.dataset.op === 'borrar') {
+    const desde = (ini === fin) ? Math.max(0, ini - 1) : ini;
+    input.value = input.value.slice(0, desde) + input.value.slice(fin);
+    input.setSelectionRange(desde, desde);
+  } else {
+    input.value = input.value.slice(0, ini) + btn.dataset.op + input.value.slice(fin);
+    input.setSelectionRange(ini + 1, ini + 1);
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+});
+
 function actualizarTasaHint() {
   const hint = $('tasaHint');
   if (estado.tipo !== 'Transferencia') { hint.textContent = ''; return; }
@@ -247,6 +278,7 @@ $('guardarConfigBtn').addEventListener('click', () => {
 $('limpiarCacheBtn').addEventListener('click', () => {
   localStorage.removeItem(LS_CACHE_MIGRADOS);
   localStorage.removeItem(LS_CACHE_RECIENTES);
+  localStorage.removeItem(LS_CACHE_TOTAL);
   $('configOverlay').classList.remove('active');
   toast('Bajando todo de nuevo…');
   cargarTodo();
@@ -262,6 +294,7 @@ $('refrescarBtn').addEventListener('click', async () => {
 function mostrarVista(nombre) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.view === nombre));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + nombre));
+  document.body.classList.toggle('vista-cargar', nombre === 'cargar');
   if (nombre === 'movimientos') renderMovimientos();
   if (nombre === 'activos') renderActivos();
 }
@@ -716,10 +749,45 @@ function aplicarConfig(data) {
   patrimonio = Number(config.patrimonioInvertido) || 0;
 }
 
+// Baja el historial completo por tandas. De una sola vez, 2800 filas por Apps Script
+// se pasaban del timeout y quedaba silenciosamente sin historial (por eso en la PC
+// no aparecía nada). Cada tanda lee solo su rango de filas en la planilla.
+async function descargarHistorial(totalEsperado) {
+  const migrados = [];
+  let desde = 0;
+  let total = totalEsperado || 0;
+
+  for (let vuelta = 0; vuelta < 60; vuelta++) {
+    const pag = await apiGet({ action: 'movimientos', desde, limite: PAGINA_HISTORIAL }, TIMEOUT_LARGO);
+
+    if (Array.isArray(pag)) { // backend viejo: ignora "desde" y manda todo junto
+      pag.filter(esMigrado).forEach(m => migrados.push(m));
+      total = pag.length;
+      break;
+    }
+
+    const filas = pag.filas || [];
+    total = Number(pag.total) || total;
+    filas.filter(esMigrado).forEach(m => migrados.push(m));
+    desde += filas.length;
+    if (!filas.length || desde >= total) break;
+    toast(`Bajando historial… ${desde} de ${total}`, 60000);
+  }
+
+  localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
+  localStorage.setItem(LS_CACHE_TOTAL, String(total));
+  const recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]');
+  combinar(recientesActuales, migrados);
+  return migrados.length;
+}
+
 async function cargarTodo() {
   const cachedRecientes = localStorage.getItem(LS_CACHE_RECIENTES);
   const cachedMigrados = localStorage.getItem(LS_CACHE_MIGRADOS);
   const migradosIniciales = cachedMigrados ? JSON.parse(cachedMigrados) : [];
+  ultimaSync = Date.now();
+  let totalServidor = 0;
+  let recientesServidor = null;
 
   try {
     let data = await apiGet({ action: 'bootstrap' });
@@ -734,26 +802,40 @@ async function cargarTodo() {
     }
     aplicarCategorias(data.categorias);
     aplicarConfig(data.config);
-    localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(data.recientes || []));
-    combinar(data.recientes || [], migradosIniciales);
+    recientesServidor = data.recientes || [];
+    totalServidor = Number(data.total) || 0;
+    localStorage.setItem(LS_CACHE_RECIENTES, JSON.stringify(recientesServidor));
+    combinar(recientesServidor, migradosIniciales);
   } catch (err) {
     if (!cachedRecientes && !cachedMigrados) toast('No pude conectar con tu planilla. Revisá la URL en ⚙️');
+    return; // sin red no tiene sentido seguir; queda lo cacheado
   }
 
-  if (!cachedMigrados) {
+  // el historial se vuelve a bajar si falta, o si las cuentas no cierran contra la
+  // planilla (algo se agregó o borró desde otro dispositivo)
+  const localTotal = (recientesServidor || []).length + migradosIniciales.length;
+  const desincronizado = totalServidor > 0 && localTotal !== totalServidor;
+  if (!cachedMigrados || desincronizado) {
     try {
-      const todos = await apiGet({ action: 'movimientos' });
-      const migrados = todos.filter(esMigrado);
-      localStorage.setItem(LS_CACHE_MIGRADOS, JSON.stringify(migrados));
-      const recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]');
-      combinar(recientesActuales, migrados);
+      const n = await descargarHistorial(totalServidor);
+      toast(cachedMigrados ? 'Datos sincronizados' : `Historial listo: ${n} movimientos`);
     } catch (err) {
-      // sin historial migrado por ahora; se reintenta en la próxima apertura
+      toast('No pude bajar todo el historial. Probá de nuevo con mejor señal.');
     }
   }
 
   sincronizarCola();
 }
+
+// Al volver a la app (cambiar de pestaña, desbloquear el celu) se refresca sola,
+// así lo que cargaste en el otro dispositivo aparece sin tener que tocar nada.
+function refrescarSiHaceFalta() {
+  if (document.visibilityState !== 'visible' || !apiUrl()) return;
+  if (Date.now() - ultimaSync < 45000) return;
+  cargarTodo();
+}
+document.addEventListener('visibilitychange', refrescarSiHaceFalta);
+window.addEventListener('focus', refrescarSiHaceFalta);
 
 function guardarCacheMovimientos() {
   const migrados = movimientos.filter(esMigrado);
@@ -842,6 +924,15 @@ function renderUltimos() {
 // un solo listener por lista (delegación): no importa cuántas filas haya
 function delegarLista(cont) {
   cont.addEventListener('click', (e) => {
+    if (e.target.id === 'verTodoBtn') {
+      ['filtroTipo', 'filtroMoneda', 'filtroMes'].forEach(id => { $(id).value = ''; });
+      $('filtroMes').dataset.tocado = '1';
+      $('buscar').value = '';
+      limiteRender = PAGINA;
+      movSucio = true;
+      renderMovimientos();
+      return;
+    }
     const grupo = e.target.closest('.grupo-item');
     if (grupo) {
       const k = grupo.dataset.grupo;
@@ -866,11 +957,15 @@ function poblarFiltroMeses() {
   const select = $('filtroMes');
   const actual = select.value;
   const mesHoy = fechaLocalStr(new Date()).slice(0, 7);
-  const meses = [...new Set(movimientos.map(m => mesDe(m.fecha)))].filter(Boolean).sort().reverse();
+  const conDatos = new Set(movimientos.map(m => mesDe(m.fecha)).filter(Boolean));
+  const meses = [...conDatos].sort().reverse();
   if (!meses.includes(mesHoy)) meses.unshift(mesHoy);
   select.innerHTML = '<option value="">Todos los meses</option>' +
     meses.map(m => `<option value="${m}">${nombreMes(m)}</option>`).join('');
-  select.value = select.dataset.tocado ? actual : mesHoy; // por defecto, el mes actual
+  if (select.dataset.tocado) { select.value = actual; return; }
+  // por defecto el mes actual, pero si todavía no cargaste nada este mes mostramos
+  // el último mes con movimientos en vez de una lista vacía
+  select.value = conDatos.has(mesHoy) ? mesHoy : (meses.find(m => conDatos.has(m)) || '');
 }
 
 ['filtroTipo', 'filtroMoneda'].forEach(id => $(id).addEventListener('change', () => { limiteRender = PAGINA; movSucio = true; renderMovimientos(); }));
@@ -900,7 +995,10 @@ function renderMovimientos() {
 
   const cont = $('listaMovimientos');
   if (!filtrados.length) {
-    cont.innerHTML = '<div class="vacio">No hay movimientos para este filtro</div>';
+    const hayOtros = movimientos.length > 0;
+    cont.innerHTML = hayOtros
+      ? `<div class="vacio">No hay movimientos con estos filtros<br><button type="button" class="link-btn" id="verTodoBtn">Ver todos</button></div>`
+      : '<div class="vacio">Todavía no hay movimientos acá</div>';
     $('mostrarMasBtn').classList.add('oculto');
     return;
   }
@@ -1207,6 +1305,7 @@ if ('serviceWorker' in navigator) {
 
 // ---------- Init ----------
 function init() {
+  document.body.classList.add('vista-cargar');
   $('fecha').value = fechaLocalStr(new Date());
   $('moneda').value = estado.moneda;
   $('monedaDestino').value = estado.monedaDestino;

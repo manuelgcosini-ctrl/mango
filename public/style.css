@@ -210,16 +210,23 @@ main { padding: 0 16px; max-width: 480px; margin: 0 auto; }
 .tab-ico { font-size: 20px; line-height: 1; }
 .tab-btn.active { color: var(--accent); background: rgba(34,197,94,.10); }
 
-/* Guardar siempre a mano, pegado al pie mientras el formulario está en pantalla */
+/* Guardar siempre a mano: fijo arriba de las pestañas, solo en la vista Cargar */
 .barra-guardar {
-  position: sticky;
-  bottom: calc(70px + env(safe-area-inset-bottom));
-  background: var(--card);
-  margin: 0 -16px;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(62px + env(safe-area-inset-bottom));
+  z-index: 14;
+  max-width: 480px;
+  margin: 0 auto;
   padding: 8px 16px 10px;
-  z-index: 5;
+  background: var(--card);
+  border-top: 1px solid var(--border);
 }
-.barra-guardar .primary { margin-top: 6px; }
+.barra-guardar .primary { margin-top: 0; }
+body:not(.vista-cargar) .barra-guardar { display: none; }
+/* espacio para que el final del formulario no quede tapado por la barra */
+body.vista-cargar { padding-bottom: calc(168px + env(safe-area-inset-bottom)); }
 
 .view { display: none; }
 .view.active { display: block; animation: fadein .18s ease; }
@@ -366,6 +373,25 @@ input, select, textarea {
 
 .fecha-custom { margin-top: 8px; }
 .oculto { display: none !important; }
+
+/* el teclado numérico del celu no trae + − × ÷, así que van como botones */
+.ops {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ops button {
+  flex: 1;
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 0;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ops button:active { background: var(--border); }
 
 .calc-hint, .tasa-hint {
   font-size: 12px;

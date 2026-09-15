@@ -1,9 +1,10 @@
 /**
  * Backend de Mango: expone la Google Sheet como una mini API.
  *
- * GET  ?action=bootstrap               -> { categorias, config, recientes } en una sola llamada
+ * GET  ?action=bootstrap               -> { categorias, config, recientes, total } en una sola llamada
  * GET  ?action=movimientos             -> lista todos los movimientos
  * GET  ?action=movimientos&recientes=1 -> solo los que no son del historial migrado (id sin prefijo "mig-")
+ * GET  ?action=movimientos&desde=N&limite=M -> { filas, total, desde } para bajar el historial por tandas
  * GET  ?action=categorias / ?action=config
  * POST { id?, fecha, tipo, monto, moneda, medioPago, categoria, subcategoria, nota,
  *        monedaDestino, medioPagoDestino, montoRecibido, grupo? } -> agrega (o, si el id ya existe, actualiza)
@@ -26,14 +27,22 @@ function doGet(e) {
   var action = e.parameter.action || 'movimientos';
 
   if (action === 'bootstrap') {
+    var todos = readSheet(ss.getSheetByName('Movimientos'));
     return jsonResponse({
       categorias: readSheet(ss.getSheetByName('Categorias')),
       config: cfg,
-      recientes: soloRecientes(readSheet(ss.getSheetByName('Movimientos')))
+      recientes: soloRecientes(todos),
+      total: todos.length
     });
   }
   if (action === 'categorias') return jsonResponse(readSheet(ss.getSheetByName('Categorias')));
   if (action === 'config') return jsonResponse(cfg);
+
+  // tanda del historial: lee solo ese rango de filas, no la hoja entera
+  if (action === 'movimientos' && e.parameter.desde !== undefined) {
+    return jsonResponse(leerPagina(ss.getSheetByName('Movimientos'),
+      Number(e.parameter.desde) || 0, Number(e.parameter.limite) || 600));
+  }
 
   var movimientos = readSheet(ss.getSheetByName('Movimientos'));
   if (e.parameter.recientes) movimientos = soloRecientes(movimientos);
@@ -122,10 +131,7 @@ function escribirFila(sheet, fila, body) {
   sheet.getRange(fila, COLS).setValue(body.grupo || '');
 }
 
-function readSheet(sheet) {
-  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
-  var data = sheet.getDataRange().getValues();
-  var headers = data.shift();
+function mapearFilas(headers, data, tz) {
   return data.map(function (row) {
     var obj = {};
     headers.forEach(function (h, i) {
@@ -141,6 +147,25 @@ function readSheet(sheet) {
     });
     return obj;
   });
+}
+
+function readSheet(sheet) {
+  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  var data = sheet.getDataRange().getValues();
+  var headers = data.shift();
+  return mapearFilas(headers, data, tz);
+}
+
+function leerPagina(sheet, desde, limite) {
+  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var total = Math.max(0, lastRow - 1);
+  var cant = Math.min(limite, total - desde);
+  if (cant <= 0) return { filas: [], total: total, desde: desde };
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var data = sheet.getRange(2 + desde, 1, cant, lastCol).getValues();
+  return { filas: mapearFilas(headers, data, tz), total: total, desde: desde };
 }
 
 function readConfig(sheet) {
