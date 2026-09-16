@@ -142,6 +142,11 @@ function fmt(n, moneda) {
   return moneda ? `${num} ${moneda}` : num;
 }
 
+// para las tarjetas del mes: el total de un mes no necesita centavos y asi entra
+function fmtStat(n) {
+  return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(Number(n) || 0);
+}
+
 function fmtCorto(n) {
   const v = Number(n) || 0;
   if (Math.abs(v) >= 10000) return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(v);
@@ -175,6 +180,34 @@ function nombreMes(ym) {
   return `${nombres[m - 1]} ${y}`;
 }
 
+// "9 abr 2025": corta pero con año, que en una deuda de hace un año importa
+function fechaCorta(iso) {
+  if (!fechaValida(iso)) return iso || '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d)
+    .toLocaleDateString('es-AR', { day: 'numeric', month: 'short', year: 'numeric' })
+    .replace(/\./g, '');
+}
+
+function diasDelMes(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+// "Hoy", "Ayer" o "lun 15 sep": leer una lista por día es más natural que por fecha ISO
+function etiquetaDia(iso) {
+  const hoy = fechaLocalStr(new Date());
+  if (iso === hoy) return 'Hoy';
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  if (iso === fechaLocalStr(d)) return 'Ayer';
+  if (!fechaValida(iso)) return iso || 'sin fecha';
+  const [y, m, dd] = iso.split('-').map(Number);
+  return new Date(y, m - 1, dd)
+    .toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short' })
+    .replace(/\./g, '');
+}
+
 function fechaLarga(iso) {
   if (!fechaValida(iso)) return '';
   const [y, m, d] = iso.split('-').map(Number);
@@ -193,6 +226,41 @@ function sinAcentos(s) {
 
 function esMigrado(m) { return !!(m && m.id && String(m.id).startsWith('mig-')); }
 function claveGrupo(m) { return m.grupo || m.id; }
+
+// ---------- Qué es gasto de verdad y qué no ----------
+// Cambiar AUD a euros no es gastar: la plata sigue siendo tuya. Comprar un ETF
+// tampoco. Prestarle a alguien tampoco, si vuelve. Los tres salían contados como
+// gasto del mes y lo inflaban; ahora tienen su propia línea en el Resumen.
+const RE_CAMBIO = /cambio de moneda|aud to eur|eur to aud|\d+\s*eur(os)?\b|\beuros\b/i;
+const RE_PRESTAMO = /^\s*pr[eé]stamo\b|^\s*presto\b|\bdeuda\b|le prest[eé]/i;
+
+function claseMovimiento(m) {
+  if (m.tipo === 'Ingreso') return 'ingreso';
+  if (m.tipo === 'Transferencia') return 'interno';
+  if (m.categoria === 'Inversiones') return 'inversion';
+  const texto = `${m.subcategoria || ''} ${m.nota || ''}`;
+  if (m.categoria === 'Finanzas' && RE_CAMBIO.test(texto)) return 'cambio';
+  if (m.subcategoria === 'Préstamos' || RE_PRESTAMO.test(texto)) return 'prestamo';
+  return 'consumo';
+}
+const esConsumo = (m) => claseMovimiento(m) === 'consumo';
+function esPrestamo(m) { return claseMovimiento(m) === 'prestamo'; }
+
+// "Préstamo Ajeng" -> "Ajeng". Si no hay nombre, queda la nota entera.
+function personaDe(m) {
+  const n = String(m.nota || '').trim();
+  // ojo: la preposición tiene que ir separada por espacios, si no "Préstamo Ajeng"
+  // pierde la A inicial del nombre y queda "jeng"
+  const sinPrefijo = n.replace(/^\s*(?:pr[eé]stamo|presto|deuda|le prest[eé])(?:\s+(?:a|de|para))?\s+/i, '').trim();
+  return sinPrefijo || n || 'Sin nombre';
+}
+function iniciales(nombre) {
+  const p = String(nombre).trim().split(/\s+/).filter(Boolean);
+  return ((p[0] || '?')[0] + (p[1] ? p[1][0] : '')).toUpperCase();
+}
+// los préstamos saldados se marcan en Config, así no hace falta tocar la planilla
+const claveDevuelto = (id) => `devuelto_${id}`;
+const estaDevuelto = (m) => !!config[claveDevuelto(m.id)];
 
 // ---------- Red ----------
 // La planilla respondió, pero con un error (token mal, acción desconocida…). No es cuestión de señal.
@@ -384,6 +452,7 @@ function mostrarVista(nombre) {
   document.body.classList.toggle('vista-cargar', nombre === 'cargar');
   if (nombre === 'movimientos') renderMovimientos();
   if (nombre === 'activos') renderActivos();
+  if (nombre === 'prestado') renderPrestado();
 }
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => mostrarVista(btn.dataset.view)));
 function vistaActiva() { return document.querySelector('.view.active').id.replace('view-', ''); }
@@ -395,7 +464,37 @@ function aplicarTipo(tipo) {
   $('bloqueTransferencia').classList.toggle('oculto', tipo !== 'Transferencia');
   $('bloqueCategoria').classList.toggle('oculto', tipo === 'Transferencia');
   $('labelCuenta').textContent = tipo === 'Transferencia' ? 'Cuenta de origen' : 'Cuenta';
+  actualizarBloquePrestamo();
 }
+
+// al elegir Finanzas > Préstamos aparece "¿a quién?", para no depender de cómo
+// venga escrita la nota cuando después haya que listarlo en Prestado
+function actualizarBloquePrestamo() {
+  const es = estado.tipo === 'Gasto' && estado.subcategoria === 'Préstamos';
+  $('bloquePrestamo').classList.toggle('oculto', !es);
+  if (es) renderPersonasSugeridas();
+}
+
+function renderPersonasSugeridas() {
+  const vistas = new Map();
+  for (const m of movimientos) {
+    if (!esPrestamo(m) || m.tipo !== 'Gasto') continue;
+    const p = personaDe(m);
+    const k = sinAcentos(p);
+    if (k && !vistas.has(k)) vistas.set(k, p);
+  }
+  const lista = [...vistas.values()].slice(0, 8);
+  $('personaChips').innerHTML = lista.map(p =>
+    `<button type="button" class="chip" data-persona="${esc(p)}">${esc(p)}</button>`).join('');
+  $('personasSugeridas').innerHTML = lista.map(p => `<option value="${esc(p)}">`).join('');
+}
+
+$('personaChips').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip');
+  if (!b) return;
+  $('persona').value = b.dataset.persona;
+  document.querySelectorAll('#personaChips .chip').forEach(x => x.classList.toggle('active', x === b));
+});
 
 $('tipoToggle').addEventListener('click', (e) => {
   const btn = e.target.closest('.tipo-btn');
@@ -407,10 +506,20 @@ $('tipoToggle').addEventListener('click', (e) => {
 });
 
 // ---------- Fecha ----------
-function actualizarFechaHint() {
+// la línea colapsada de arriba del todo: "Hoy · AUD Banco"
+function actualizarContexto() {
   const v = $('fecha').value;
-  $('fechaHint').textContent = fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha con "Otra 📅"';
+  const chip = document.querySelector('#fechaChips .chip.active');
+  const cuando = (chip && chip.dataset.dias !== undefined) ? chip.textContent.trim()
+    : (fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha');
+  $('contextoTexto').textContent = `${cuando} · ${estado.moneda} ${estado.medio}`;
 }
+const actualizarFechaHint = actualizarContexto;
+
+$('contextoBtn').addEventListener('click', () => {
+  const abierto = $('contextoPanel').classList.toggle('oculto');
+  $('contextoBtn').setAttribute('aria-expanded', String(!abierto));
+});
 
 // "Hoy" se recalcula al volver a la app: una PWA puede quedar abierta desde ayer
 // y si no, el chip dice Hoy pero la fecha de abajo es la de ayer.
@@ -466,10 +575,13 @@ function renderMedioChips(contId, moneda, medioActivo, onSelect) {
   });
 }
 
+const fijarMedio = (m) => { estado.medio = m; actualizarContexto(); };
+
 $('moneda').addEventListener('change', (e) => {
   estado.moneda = e.target.value;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });
+  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
   actualizarTasaHint();
+  actualizarContexto();
 });
 $('monedaDestino').addEventListener('change', (e) => {
   estado.monedaDestino = e.target.value;
@@ -490,6 +602,22 @@ function htmlCatChip(cat, ico) {
   return `<button type="button" class="cat-chip" data-cat="${esc(cat)}"><span class="ico">${ico || '🏷️'}</span>${esc(cat)}</button>`;
 }
 
+const CATS_VISIBLES = 6;
+let catsExpandidas = false;
+
+// Once categorias a dos por fila son seis filas, y empujan la subcategoria y la
+// nota fuera de pantalla. Se muestran las que mas usas y el resto queda detras
+// de un "+ mas": casi siempre la que buscas ya esta en las primeras.
+function ordenarPorUso(unicas) {
+  const desde = sumarMeses(fechaLocalStr(new Date()).slice(0, 7), -3);
+  const uso = {};
+  for (const m of movimientos) {
+    if (m.tipo !== estado.tipo || mesDe(m.fecha) < desde) continue;
+    uso[m.categoria] = (uso[m.categoria] || 0) + 1;
+  }
+  return unicas.slice().sort((a, b) => (uso[b.categoria] || 0) - (uso[a.categoria] || 0));
+}
+
 function renderCategoriaChips() {
   const cont = $('categoriaChips');
   const delTipo = fuenteCategorias().filter(c => c.tipo === estado.tipo);
@@ -497,11 +625,17 @@ function renderCategoriaChips() {
   const vistas = new Set();
   delTipo.forEach(c => { if (!vistas.has(c.categoria)) { vistas.add(c.categoria); unicas.push(c); } });
 
-  cont.innerHTML = unicas.map(c => htmlCatChip(c.categoria, c.categoriaIcono)).join('');
+  const orden = ordenarPorUso(unicas);
+  const hayDeMas = orden.length > CATS_VISIBLES + 1;
+  const mostradas = (catsExpandidas || !hayDeMas) ? orden : orden.slice(0, CATS_VISIBLES);
 
-  if (unicas.length) {
-    cont.querySelector('.cat-chip').classList.add('active');
-    estado.categoria = unicas[0].categoria;
+  cont.innerHTML = mostradas.map(c => htmlCatChip(c.categoria, c.categoriaIcono)).join('')
+    + (hayDeMas ? `<button type="button" class="cat-chip mas-cats" id="masCats">${catsExpandidas ? '− menos' : `+ ${orden.length - CATS_VISIBLES} más`}</button>` : '');
+
+  if (orden.length) {
+    const activa = mostradas.find(c => c.categoria === estado.categoria) || orden[0];
+    cont.querySelectorAll('.cat-chip').forEach(b => b.classList.toggle('active', b.dataset.cat === activa.categoria));
+    estado.categoria = activa.categoria;
   } else {
     estado.categoria = null;
   }
@@ -519,13 +653,16 @@ function activarCategoria(cat) {
 // un solo listener por grupo de chips (delegación), así los chips agregados al editar también responden
 $('categoriaChips').addEventListener('click', (e) => {
   const btn = e.target.closest('.cat-chip');
-  if (btn) activarCategoria(btn.dataset.cat);
+  if (!btn) return;
+  if (btn.id === 'masCats') { catsExpandidas = !catsExpandidas; renderCategoriaChips(); return; }
+  activarCategoria(btn.dataset.cat);
 });
 $('subcategoriaChips').addEventListener('click', (e) => {
   const btn = e.target.closest('.chip');
   if (!btn) return;
   document.querySelectorAll('#subcategoriaChips .chip').forEach(b => b.classList.toggle('active', b === btn));
   estado.subcategoria = btn.dataset.sub;
+  actualizarBloquePrestamo();
 });
 
 // Al editar: deja el movimiento exactamente como estaba. Si su categoría, subcategoría o
@@ -533,6 +670,10 @@ $('subcategoriaChips').addEventListener('click', (e) => {
 // subcategoría, no se le inventa una.
 function seleccionarCategoria(cat, sub) {
   const cont = $('categoriaChips');
+  if (![...cont.querySelectorAll('.cat-chip')].some(b => b.dataset.cat === cat)) {
+    catsExpandidas = true;
+    renderCategoriaChips();
+  }
   if (![...cont.querySelectorAll('.cat-chip')].some(b => b.dataset.cat === cat)) {
     cont.insertAdjacentHTML('beforeend', htmlCatChip(cat, '🏷️'));
   }
@@ -567,26 +708,60 @@ function renderSubcategoriaChips() {
     `<button type="button" class="chip${s.subcategoria === activa ? ' active' : ''}" data-sub="${esc(s.subcategoria)}">${s.subcategoriaIcono || ''} ${esc(s.subcategoria)}</button>`
   ).join('');
   estado.subcategoria = activa;
+  actualizarBloquePrestamo();
 }
 
-// notas usadas antes en esta categoría, para no tipear "Coles" por centésima vez
+// Las notas que más repetís en esta categoría, como chips de un toque: escribir
+// "Coles" por centésima vez en el teclado del celu es lo más caro de cargar un gasto.
 function renderNotasSugeridas() {
-  if (!estado.categoria) { $('notasSugeridas').innerHTML = ''; return; }
-  const vistas = new Set();
-  const notas = [];
+  if (!estado.categoria) {
+    $('notasSugeridas').innerHTML = '';
+    $('notasChips').innerHTML = '';
+    return;
+  }
+  const frec = new Map();   // clave sin acentos -> { texto, veces, ultima }
   for (const m of movimientos) {
     if (m.categoria !== estado.categoria || !m.nota) continue;
     const n = String(m.nota).trim();
     const k = sinAcentos(n);
-    if (!k || vistas.has(k)) continue;
-    vistas.add(k);
-    notas.push(n);
-    if (notas.length >= 12) break;
+    if (!k) continue;
+    const e = frec.get(k);
+    if (e) { e.veces++; if (m.fecha > e.ultima) e.ultima = m.fecha; }
+    else frec.set(k, { texto: n, veces: 1, ultima: m.fecha });
   }
-  $('notasSugeridas').innerHTML = notas.map(n => `<option value="${esc(n)}">`).join('');
+  const todas = [...frec.values()];
+  // en el desplegable las más recientes; en los chips las más repetidas
+  const recientes = todas.slice().sort((a, b) => (a.ultima < b.ultima ? 1 : -1)).slice(0, 12);
+  $('notasSugeridas').innerHTML = recientes.map(e => `<option value="${esc(e.texto)}">`).join('');
+  const top = todas.filter(e => e.veces > 1)
+    .sort((a, b) => b.veces - a.veces || (a.ultima < b.ultima ? 1 : -1))
+    .slice(0, 6);
+  $('notasChips').innerHTML = top.map(e =>
+    `<button type="button" class="chip" data-nota="${esc(e.texto)}">${esc(e.texto)}</button>`).join('');
 }
 
+$('notasChips').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip');
+  if (!b) return;
+  const input = $('nota');
+  const yaEstaba = input.value.trim() === b.dataset.nota;
+  input.value = yaEstaba ? '' : b.dataset.nota;
+  document.querySelectorAll('#notasChips .chip').forEach(x =>
+    x.classList.toggle('active', !yaEstaba && x === b));
+});
+
 // ---------- Guardar movimiento ----------
+// En un préstamo la nota queda siempre como "Préstamo <persona>", así la pestaña
+// Prestado puede listarlo sin depender de cómo se haya escrito ese día.
+function notaFinal() {
+  const nota = $('nota').value.trim();
+  if (estado.tipo === 'Gasto' && estado.subcategoria === 'Préstamos') {
+    const persona = $('persona').value.trim();
+    if (persona) return `Préstamo ${persona}${nota ? ' · ' + nota : ''}`;
+  }
+  return nota;
+}
+
 function leerFormulario() {
   return {
     fecha: fechaValida($('fecha').value) ? $('fecha').value : '',
@@ -596,7 +771,7 @@ function leerFormulario() {
     medioPago: estado.medio,
     categoria: estado.tipo === 'Transferencia' ? '' : (estado.categoria || ''),
     subcategoria: estado.tipo === 'Transferencia' ? '' : (estado.subcategoria || ''),
-    nota: $('nota').value.trim(),
+    nota: notaFinal(),
     monedaDestino: estado.tipo === 'Transferencia' ? estado.monedaDestino : '',
     medioPagoDestino: estado.tipo === 'Transferencia' ? estado.medioDestino : '',
     montoRecibido: estado.tipo === 'Transferencia' ? montoNumerico($('montoRecibido')) : '',
@@ -695,13 +870,17 @@ function resetFormularioCargar() {
   $('monto').value = '';
   $('montoRecibido').value = '';
   $('nota').value = '';
+  $('persona').value = '';
+  document.querySelectorAll('#notasChips .chip, #personaChips .chip').forEach(c => c.classList.remove('active'));
   $('calcHint').textContent = '';
   $('tasaHint').textContent = '';
   document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
   $('fecha').classList.add('oculto');
   document.querySelector('#fechaChips .chip[data-dias="0"]').classList.add('active');
   $('fecha').value = fechaLocalStr(new Date());
-  actualizarFechaHint();
+  $('contextoPanel').classList.add('oculto');
+  $('contextoBtn').setAttribute('aria-expanded', 'false');
+  actualizarContexto();
   aplicarTipo('Gasto');
   renderCategoriaChips();
   $('bannerEdicion').classList.add('oculto');
@@ -730,7 +909,7 @@ function abrirEdicion(mov) {
   estado.moneda = mov.moneda;
   $('moneda').value = mov.moneda;
   estado.medio = mov.medioPago;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });
+  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
 
   if (estado.tipo === 'Transferencia') {
     estado.monedaDestino = mov.monedaDestino;
@@ -744,7 +923,14 @@ function abrirEdicion(mov) {
   }
 
   $('monto').value = mov.monto;
-  $('nota').value = mov.nota || '';
+  if (esPrestamo(mov) && mov.tipo === 'Gasto') {
+    $('persona').value = personaDe(mov);
+    $('nota').value = '';
+  } else {
+    $('persona').value = '';
+    $('nota').value = mov.nota || '';
+  }
+  actualizarBloquePrestamo();
   $('calcHint').textContent = '';
   actualizarTasaHint();
 
@@ -922,6 +1108,7 @@ function despuesDeCambiar(incluirMigrados = false) {
   renderUltimos();
   if (vistaActiva() === 'movimientos') renderMovimientos();
   if (vistaActiva() === 'activos') renderActivos();
+  if (vistaActiva() === 'prestado') renderPrestado();
 }
 
 function agregarLocal(mov) {
@@ -961,6 +1148,7 @@ function combinar(recientes, migrados) {
   renderNotasSugeridas();
   if (vistaActiva() === 'movimientos') renderMovimientos();
   if (vistaActiva() === 'activos') renderActivos();
+  if (vistaActiva() === 'prestado') renderPrestado();
 }
 
 function aplicarCategorias(data) {
@@ -979,6 +1167,7 @@ function aplicarConfig(data) {
   localStorage.setItem(LS_CACHE_CONFIG, JSON.stringify(config));
   patrimonio = Number(config.patrimonioInvertido) || 0;
   if (vistaActiva() === 'activos') renderActivos();
+  if (vistaActiva() === 'prestado') renderPrestado();
 }
 
 // escritura de Config (ancla de saldo, patrimonio) con la misma cola que los movimientos
@@ -1130,21 +1319,28 @@ function agruparMovimientos(lista) {
   return salida;
 }
 
-function htmlFila(m, extra = '') {
-  const cuentaTxt = m.tipo === 'Transferencia'
+// El signo va explícito además del color: con sol fuerte el color solo no alcanza.
+function signoDe(m) { return m.tipo === 'Ingreso' ? '+' : (m.tipo === 'Gasto' ? '−' : ''); }
+function cuentaDe(m) {
+  return m.tipo === 'Transferencia'
     ? `${m.moneda} ${m.medioPago} → ${m.monedaDestino} ${m.medioPagoDestino}`
-    : `${m.moneda} ${m.medioPago || ''}`;
+    : (m.medioPago || m.moneda);
+}
+
+// La nota es lo que identifica el gasto ("Coles", "Santarasa"), así que va de
+// primera; la categoría pasa a la segunda línea. Si no hay nota, manda la categoría.
+function htmlFila(m, extra = '') {
+  const nota = String(m.nota || '').trim();
+  const titulo = nota || nombreMov(m);
+  const meta = nota ? `${nombreMov(m)} · ${cuentaDe(m)}` : cuentaDe(m);
   return `
     <div class="gasto-item ${extra}" data-id="${esc(m.id)}">
-      <div class="gasto-info">
-        <div class="gasto-ico">${iconoDe(m)}</div>
-        <div class="gasto-texto">
-          <div class="cat">${esc(nombreMov(m))}${m.pendiente ? '<span class="badge-pendiente" title="Todavía no llegó a la planilla">pendiente</span>' : ''}</div>
-          <div class="meta">${esc(soloFecha(m.fecha))} · ${esc(cuentaTxt)}${m.nota ? ' · ' + esc(m.nota) : ''}</div>
-        </div>
+      <div class="gasto-ico">${iconoDe(m)}</div>
+      <div class="gasto-texto">
+        <div class="titulo">${esc(titulo)}${m.pendiente ? '<span class="badge-pendiente" title="Todavía no llegó a la planilla">pendiente</span>' : ''}</div>
+        <div class="meta">${esc(meta)}</div>
       </div>
-      <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${fmt(m.monto, m.moneda)}</div>
-      <span class="grupo-flecha">›</span>
+      <div class="gasto-monto ${(m.tipo || 'Gasto').toLowerCase()}">${signoDe(m)}${fmt(m.monto, m.moneda)}</div>
     </div>`;
 }
 
@@ -1152,17 +1348,15 @@ function htmlGrupo(g) {
   const base = g.miembros[0];
   const total = g.miembros.reduce((s, m) => s + (Number(m.monto) || 0), 0);
   const abierto = gruposAbiertos.has(g.grupo);
-  const notas = [...new Set(g.miembros.map(m => m.nota).filter(Boolean))].join(' + ');
+  const notas = [...new Set(g.miembros.map(m => String(m.nota || '').trim()).filter(Boolean))].join(' + ');
   return `
     <div class="gasto-item grupo-item${abierto ? ' abierto' : ''}" data-grupo="${esc(g.grupo)}">
-      <div class="gasto-info">
-        <div class="gasto-ico">${iconoDe(base)}</div>
-        <div class="gasto-texto">
-          <div class="cat">${esc(nombreMov(base))} <span class="badge-grupo">${g.miembros.length} cargos</span></div>
-          <div class="meta">${esc(soloFecha(base.fecha))} · ${esc(base.moneda)} ${esc(base.medioPago || '')}${notas ? ' · ' + esc(notas) : ''}</div>
-        </div>
+      <div class="gasto-ico">${iconoDe(base)}</div>
+      <div class="gasto-texto">
+        <div class="titulo">${esc(notas || nombreMov(base))}<span class="badge-grupo">${g.miembros.length} cargos</span></div>
+        <div class="meta">${esc(nombreMov(base))} · ${esc(cuentaDe(base))}</div>
       </div>
-      <div class="gasto-monto ${(base.tipo || 'Gasto').toLowerCase()}">${fmt(total, base.moneda)}</div>
+      <div class="gasto-monto ${(base.tipo || 'Gasto').toLowerCase()}">${signoDe(base)}${fmt(total, base.moneda)}</div>
       <span class="grupo-flecha">${abierto ? '▾' : '▸'}</span>
     </div>
     <div class="grupo-miembros${abierto ? '' : ' oculto'}" data-grupo-de="${esc(g.grupo)}">
@@ -1286,14 +1480,20 @@ function renderMovimientos(soloAgregar = false) {
     }
   }
 
+  // Agrupadas por día con el total del día al costado. Sin contenedor por día:
+  // "Mostrar más" corta en cualquier lado y un div abierto a mitad de tanda no
+  // se puede continuar después (el parser lo cierra solo).
   const nuevas = entradasRender.slice(yaRenderizadas, limiteRender);
   let html = '';
   nuevas.forEach(e => {
     const base = e.mov || e.miembros[0];
-    const mes = mesDe(base.fecha);
-    if (mes !== ultimoMesRender) {
-      html += `<div class="mes-header">${nombreMes(mes)}</div>`;
-      ultimoMesRender = mes;
+    const dia = soloFecha(base.fecha);
+    if (dia !== ultimoMesRender) {
+      html += `<div class="dia-header">
+          <div class="dia-nombre">${esc(etiquetaDia(dia))}<span class="dia-fecha">${esc(dia)}</span></div>
+          <div class="dia-total">${totalDelDia(dia)}</div>
+        </div>`;
+      ultimoMesRender = dia;
     }
     html += e.mov ? htmlFila(e.mov) : htmlGrupo(e);
   });
@@ -1301,6 +1501,18 @@ function renderMovimientos(soloAgregar = false) {
   yaRenderizadas = Math.min(limiteRender, entradasRender.length);
   $('mostrarMasBtn').classList.toggle('oculto', entradasRender.length <= yaRenderizadas);
   $('mostrarMasBtn').textContent = `Mostrar más (${entradasRender.length - yaRenderizadas} restantes)`;
+}
+
+// total gastado ese día, en las monedas que haya, respetando el filtro activo
+function totalDelDia(dia) {
+  const porMoneda = {};
+  entradasRender.forEach(e => {
+    (e.mov ? [e.mov] : e.miembros).forEach(m => {
+      if (soloFecha(m.fecha) !== dia || m.tipo !== 'Gasto') return;
+      porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + (Number(m.monto) || 0);
+    });
+  });
+  return Object.entries(porMoneda).map(([mon, v]) => `−${fmt(v, mon)}`).join(' · ');
 }
 
 function renderTotales(lista) {
@@ -1428,8 +1640,7 @@ function renderActivos() {
   const entradas = Object.entries(saldos);
   $('saldosCuentas').innerHTML = entradas.length
     ? entradas.map(([cuenta, saldo]) => {
-        const moneda = cuenta.split(' ')[0];
-        return `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo, moneda)}</b></div>`;
+        return `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo)}</b></div>`;
       }).join('')
     : '<div class="vacio">Todavía no hay movimientos</div>';
 
@@ -1444,53 +1655,226 @@ $('saldosCuentas').addEventListener('click', (e) => {
   abrirAjuste(fila.dataset.cuenta);
 });
 
-$('mesAnteriorBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, -1); renderResumenMes(); });
-$('mesSiguienteBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, 1); renderResumenMes(); });
+$('mesAnteriorBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, -1); catAbierta = null; renderResumenMes(); });
+$('mesSiguienteBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, 1); catAbierta = null; renderResumenMes(); });
+
+let catAbierta = null;        // categoría desplegada en el resumen
+let monedaTendencia = null;   // moneda elegida en el gráfico de 6 meses
+
+// Gasto por categoría de un mes, contando solo consumo real.
+function gastoPorCategoria(ym, moneda) {
+  const cats = {};
+  let total = 0;
+  movimientos.forEach(m => {
+    if (mesDe(m.fecha) !== ym || m.moneda !== moneda || m.tipo !== 'Gasto') return;
+    if (!esConsumo(m)) return;
+    const monto = Number(m.monto) || 0;
+    const cat = m.categoria || 'Otros';
+    cats[cat] = (cats[cat] || 0) + monto;
+    total += monto;
+  });
+  return { cats, total };
+}
+
+// Promedio de los meses COMPLETOS anteriores. El mes en curso nunca entra al
+// promedio: si no, se compara medio mes contra meses enteros y todo parece bajar.
+function promedioCategorias(ym, moneda, cantidad = 6) {
+  const suma = {};
+  const presencias = {};
+  let totalSuma = 0;
+  for (let i = 1; i <= cantidad; i++) {
+    const mes = sumarMeses(ym, -i);
+    const { cats, total } = gastoPorCategoria(mes, moneda);
+    totalSuma += total;
+    Object.entries(cats).forEach(([c, v]) => {
+      suma[c] = (suma[c] || 0) + v;
+      presencias[c] = (presencias[c] || 0) + 1;
+    });
+  }
+  const prom = {};
+  Object.keys(suma).forEach(c => { prom[c] = suma[c] / cantidad; });
+  return { prom, presencias, promTotal: totalSuma / cantidad };
+}
+
+function htmlDelta(actual, promedio, presencias) {
+  // con pocos datos el porcentaje miente: un solo regalo da +400%
+  if (presencias < 3 || promedio < 1) return '';
+  const pct = Math.round((actual - promedio) / promedio * 100);
+  if (Math.abs(pct) < 15) return '<span class="delta igual">igual que siempre</span>';
+  const clase = pct > 0 ? 'sube' : 'baja';
+  return `<span class="delta ${clase}">${pct > 0 ? '+' : ''}${pct}% vs promedio</span>`;
+}
 
 function renderResumenMes() {
-  $('mesTitulo').textContent = nombreMes(mesResumen);
-  const delMes = movimientos.filter(m => mesDe(m.fecha) === mesResumen && m.tipo !== 'Transferencia');
-  const porMoneda = {};
-  delMes.forEach(m => {
-    const p = porMoneda[m.moneda] = porMoneda[m.moneda] || { gasto: 0, ingreso: 0, cats: {} };
-    const monto = Number(m.monto) || 0;
-    if (m.tipo === 'Ingreso') { p.ingreso += monto; return; }
-    p.gasto += monto;
-    p.cats[m.categoria || 'Otros'] = (p.cats[m.categoria || 'Otros'] || 0) + monto;
-  });
+  const mesHoy = fechaLocalStr(new Date()).slice(0, 7);
+  const esMesActual = mesResumen === mesHoy;
+  const hoy = new Date();
+  const diaDeHoy = esMesActual ? hoy.getDate() : diasDelMes(mesResumen);
 
-  const monedas = Object.keys(porMoneda).sort((a, b) => porMoneda[b].gasto - porMoneda[a].gasto);
-  if (!monedas.length) {
-    $('resumenMes').innerHTML = '<div class="vacio">Sin movimientos este mes</div>';
+  $('mesTitulo').textContent = nombreMes(mesResumen);
+  $('mesSub').textContent = esMesActual
+    ? `En curso · día ${diaDeHoy} de ${diasDelMes(mesResumen)}`
+    : '';
+
+  const delMes = movimientos.filter(m => mesDe(m.fecha) === mesResumen && m.tipo !== 'Transferencia');
+  if (!delMes.length) {
+    $('resumenMes').innerHTML = '<div class="card"><div class="vacio">Sin movimientos este mes</div></div>';
+    $('ritmoMes').innerHTML = '';
+    $('noComputado').innerHTML = '';
     return;
   }
 
+  // por moneda: consumo, ingresos, y lo que no es ninguna de las dos cosas
+  const porMoneda = {};
+  delMes.forEach(m => {
+    const p = porMoneda[m.moneda] = porMoneda[m.moneda] ||
+      { gasto: 0, ingreso: 0, inversion: 0, cambio: 0, prestamo: 0 };
+    const monto = Number(m.monto) || 0;
+    if (m.tipo === 'Ingreso') { p.ingreso += monto; return; }
+    const clase = claseMovimiento(m);
+    if (clase === 'consumo') p.gasto += monto;
+    else if (p[clase] !== undefined) p[clase] += monto;
+  });
+
+  const monedas = Object.keys(porMoneda).sort((a, b) => porMoneda[b].gasto - porMoneda[a].gasto);
+
   $('resumenMes').innerHTML = monedas.map(moneda => {
     const p = porMoneda[moneda];
-    const cats = Object.entries(p.cats).sort((a, b) => b[1] - a[1]);
-    const max = cats.length ? cats[0][1] : 1;
+    const { cats, total } = gastoPorCategoria(mesResumen, moneda);
+    const { prom, presencias } = promedioCategorias(mesResumen, moneda);
+    const ordenadas = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    const max = ordenadas.length ? ordenadas[0][1] : 1;
+
+    // el ahorro solo tiene sentido donde entra plata; en euros sin sueldo no dice nada
+    const hayIngresos = p.ingreso > 0;
+    const ahorro = p.ingreso - p.gasto;
+
     return `
-      <div class="resumen-moneda">
-        <div class="resumen-totales">
-          <div class="stat"><div class="stat-label">Gastado</div><div class="stat-valor gasto">${fmt(p.gasto, moneda)}</div></div>
-          <div class="stat"><div class="stat-label">Ingresado</div><div class="stat-valor ingreso">${fmt(p.ingreso, moneda)}</div></div>
-          <div class="stat"><div class="stat-label">Balance</div><div class="stat-valor ${p.ingreso - p.gasto < 0 ? 'gasto' : 'ingreso'}">${fmt(p.ingreso - p.gasto, moneda)}</div></div>
+      <div class="card">
+        <div class="moneda-titulo">${esc(moneda)}</div>
+        <div class="stats">
+          <div class="stat"><div class="stat-label">Gastado</div>
+            <div class="stat-valor gasto">${fmtStat(p.gasto)}</div></div>
+          <div class="stat"><div class="stat-label">Ingresado</div>
+            <div class="stat-valor ingreso">${fmtStat(p.ingreso)}</div></div>
+          ${hayIngresos ? `<div class="stat"><div class="stat-label">Ahorro</div>
+            <div class="stat-valor ${ahorro < 0 ? 'gasto' : 'ingreso'}">${fmtStat(ahorro)}</div></div>` : ''}
         </div>
-        ${cats.map(([cat, total]) => {
+        ${ordenadas.map(([cat, valor]) => {
           const ico = (fuenteCategorias().find(c => c.categoria === cat) || {}).categoriaIcono || '💸';
-          const pct = p.gasto ? Math.round(total / p.gasto * 100) : 0;
+          const pct = total ? Math.round(valor / total * 100) : 0;
+          const abierta = catAbierta === `${moneda}|${cat}`;
           return `
-            <div class="barra-row" title="${esc(cat)}: ${fmt(total, moneda)} (${pct}%)">
-              <div class="barra-label"><span class="ico">${ico}</span>${esc(cat)}</div>
-              <div class="barra-pista"><div class="barra" style="width:${Math.max(2, total / max * 100)}%"></div></div>
-              <div class="barra-valor">${fmtCorto(total)} <span class="barra-pct">${pct}%</span></div>
+            <div class="barra-row" data-cat="${esc(cat)}" data-moneda="${esc(moneda)}">
+              <div class="barra-top">
+                <div class="barra-label"><span class="ico">${ico}</span>${esc(cat)}</div>
+                <div class="barra-valor">${fmt(valor, moneda)}</div>
+              </div>
+              <div class="barra-sub">
+                <span class="barra-pct">${pct}% del gasto</span>
+                ${htmlDelta(valor, prom[cat] || 0, presencias[cat] || 0)}
+              </div>
+              <div class="barra-pista"><div class="barra" style="width:${Math.max(2, valor / max * 100)}%"></div></div>
+              ${abierta ? detalleCategoria(mesResumen, moneda, cat) : ''}
             </div>`;
         }).join('')}
       </div>`;
   }).join('');
+
+  renderRitmo(porMoneda, monedas, esMesActual, diaDeHoy);
+  renderNoComputado(porMoneda, monedas);
 }
 
-// un mini gráfico de barras por moneda con el gasto total de los últimos 6 meses (small multiples: una moneda por gráfico, un solo eje)
+// Al tocar una categoría se abre acá mismo: primero las subcategorías, después
+// los movimientos. Evita tener que ir a Movimientos y pelear con los filtros.
+function detalleCategoria(ym, moneda, cat) {
+  const items = movimientos.filter(m =>
+    mesDe(m.fecha) === ym && m.moneda === moneda && m.tipo === 'Gasto' &&
+    (m.categoria || 'Otros') === cat && esConsumo(m));
+  const subs = {};
+  items.forEach(m => {
+    const k = m.subcategoria || 'Sin subcategoría';
+    subs[k] = (subs[k] || 0) + (Number(m.monto) || 0);
+  });
+  const filasSub = Object.entries(subs).sort((a, b) => b[1] - a[1]);
+  const top = items.slice().sort((a, b) => b.monto - a.monto).slice(0, 8);
+  return `
+    <div class="detalle">
+      ${filasSub.length > 1 ? filasSub.map(([s, v]) =>
+        `<div class="detalle-row"><span class="d-nombre">${esc(s)}</span><span class="d-monto">${fmt(v, moneda)}</span></div>`).join('') : ''}
+      ${top.map(m =>
+        `<div class="detalle-row"><span class="d-nombre">${esc(soloFecha(m.fecha).slice(5))} · ${esc(String(m.nota || m.subcategoria || '—').trim())}</span><span class="d-monto">${fmt(m.monto, moneda)}</span></div>`).join('')}
+      ${items.length > 8 ? `<div class="detalle-row"><span class="d-nombre">y ${items.length - 8} más</span><span class="d-monto"></span></div>` : ''}
+    </div>`;
+}
+
+$('resumenMes').addEventListener('click', (e) => {
+  const fila = e.target.closest('.barra-row');
+  if (!fila) return;
+  const k = `${fila.dataset.moneda}|${fila.dataset.cat}`;
+  catAbierta = catAbierta === k ? null : k;
+  renderResumenMes();
+});
+
+// ¿Voy bien este mes? Ritmo diario y proyección al cierre.
+function renderRitmo(porMoneda, monedas, esMesActual, dia) {
+  if (!esMesActual || !monedas.length) { $('ritmoMes').innerHTML = ''; return; }
+  const moneda = monedas[0];                    // la moneda donde más se gasta
+  const gastado = porMoneda[moneda].gasto;
+  const total = diasDelMes(mesResumen);
+  const porDia = dia > 0 ? gastado / dia : 0;
+  const { promTotal } = promedioCategorias(mesResumen, moneda);
+
+  // La proyección usa el ritmo de los meses anteriores, no el de este mes:
+  // si el alquiler cae el día 1, extrapolar el propio mes da un disparate.
+  const promDiaHistorico = promTotal > 0 ? promTotal / 30 : porDia;
+  const proyeccion = gastado + promDiaHistorico * Math.max(0, total - dia);
+  const referencia = promTotal > 0 ? promTotal : proyeccion;
+  const escala = Math.max(proyeccion, referencia, 1);
+
+  $('ritmoMes').innerHTML = `
+    <div class="card">
+      <div class="card-title">Ritmo del mes · ${esc(moneda)}</div>
+      <div class="ritmo-cifras">
+        <div class="ritmo-item"><div class="r-label">Llevás</div><div class="r-valor">${fmtStat(gastado)}</div></div>
+        <div class="ritmo-item"><div class="r-label">Por día</div><div class="r-valor">${fmtStat(porDia)}</div></div>
+        <div class="ritmo-item"><div class="r-label">Proyección</div><div class="r-valor">${fmtStat(proyeccion)}</div></div>
+      </div>
+      <div class="ritmo-pista">
+        <div class="ritmo-barra${promTotal > 0 && proyeccion > promTotal ? ' pasado' : ''}" style="width:${Math.min(100, gastado / escala * 100)}%"></div>
+        ${promTotal > 0 ? `<div class="ritmo-marca" style="left:${Math.min(99, promTotal / escala * 100)}%" title="promedio de los últimos 6 meses"></div>` : ''}
+      </div>
+      <div class="ritmo-pie">
+        <span>día ${dia} de ${total}</span>
+        ${promTotal > 0 ? `<span>promedio: ${fmtStat(promTotal)}</span>` : ''}
+      </div>
+    </div>`;
+}
+
+// Inversiones, cambios de moneda y préstamos: salieron de la cuenta pero no son
+// consumo. Se muestran aparte para que no inflen el gasto del mes.
+function renderNoComputado(porMoneda, monedas) {
+  const filas = [];
+  monedas.forEach(moneda => {
+    const p = porMoneda[moneda];
+    if (p.inversion > 0) filas.push(['📈', 'Invertido', 'ETF, cripto, acciones', p.inversion, moneda]);
+    if (p.cambio > 0) filas.push(['💱', 'Cambiado de moneda', 'sigue siendo tuyo, en otro bolsillo', p.cambio, moneda]);
+    if (p.prestamo > 0) filas.push(['🤝', 'Prestado', 'lo seguís en la pestaña Prestado', p.prestamo, moneda]);
+  });
+  if (!filas.length) { $('noComputado').innerHTML = ''; return; }
+  $('noComputado').innerHTML = `
+    <div class="card">
+      <div class="card-title">Salió de la cuenta, pero no es gasto</div>
+      ${filas.map(([ico, t, s, v, mon]) => `
+        <div class="nc-row">
+          <div class="gasto-ico">${ico}</div>
+          <div class="nc-texto"><div class="t">${t}</div><div class="s">${s}</div></div>
+          <div class="nc-monto">${fmt(v, mon)}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
+// Gasto de consumo de los últimos 6 meses, una moneda por vez.
 function renderTendencia() {
   const mesHoy = fechaLocalStr(new Date()).slice(0, 7);
   const meses = [];
@@ -1498,46 +1882,142 @@ function renderTendencia() {
 
   const porMoneda = {};
   movimientos.forEach(m => {
-    if (m.tipo !== 'Gasto') return;
+    if (m.tipo !== 'Gasto' || !esConsumo(m)) return;
     const mes = mesDe(m.fecha);
     if (!meses.includes(mes)) return;
     porMoneda[m.moneda] = porMoneda[m.moneda] || {};
     porMoneda[m.moneda][mes] = (porMoneda[m.moneda][mes] || 0) + (Number(m.monto) || 0);
   });
 
-  const monedas = Object.keys(porMoneda);
-  if (!monedas.length) { $('tendencia').innerHTML = '<div class="vacio">Sin gastos en los últimos 6 meses</div>'; return; }
+  const monedas = Object.keys(porMoneda)
+    .sort((a, b) => Object.values(porMoneda[b]).reduce((x, y) => x + y, 0)
+                  - Object.values(porMoneda[a]).reduce((x, y) => x + y, 0));
+  if (!monedas.length) {
+    $('monedasTendencia').innerHTML = '';
+    $('tendencia').innerHTML = '<div class="vacio">Sin gastos en los últimos 6 meses</div>';
+    return;
+  }
+  if (!monedas.includes(monedaTendencia)) monedaTendencia = monedas[0];
 
-  $('tendencia').innerHTML = monedas.map(moneda => {
-    const valores = meses.map(mes => porMoneda[moneda][mes] || 0);
-    const max = Math.max(...valores, 1);
-    const W = 320, H = 120, pad = 6, base = H - 22, alto = base - pad;
-    const ancho = (W - pad * 2) / meses.length;
-    const barras = meses.map((mes, i) => {
-      const v = valores[i];
-      const h = Math.round(v / max * alto);
-      const x = pad + i * ancho + ancho * 0.18;
-      const w = ancho * 0.64;
-      const y = base - h;
-      const esActual = mes === mesHoy;
-      return `
-        <g>
-          <title>${nombreMes(mes)}: ${fmt(v, moneda)}</title>
-          <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" class="tbar${esActual ? ' actual' : ''}"></rect>
-          ${v ? `<text x="${x + w / 2}" y="${Math.max(y - 4, 10)}" class="tval">${fmtCorto(v)}</text>` : ''}
-          <text x="${x + w / 2}" y="${H - 6}" class="tlab">${nombreMes(mes).slice(0, 3)}</text>
-        </g>`;
-    }).join('');
+  $('monedasTendencia').innerHTML = monedas.length > 1 ? monedas.map(mon =>
+    `<button type="button" class="chip${mon === monedaTendencia ? ' active' : ''}" data-moneda="${esc(mon)}">${esc(mon)}</button>`).join('') : '';
+
+  const valores = meses.map(mes => porMoneda[monedaTendencia][mes] || 0);
+  const max = Math.max(...valores, 1);
+  const W = 320, H = 130, pad = 6, base = H - 24, alto = base - 14;
+  const ancho = (W - pad * 2) / meses.length;
+  const barras = meses.map((mes, i) => {
+    const v = valores[i];
+    const h = Math.round(v / max * alto);
+    const x = pad + i * ancho + ancho * 0.18;
+    const w = ancho * 0.64;
+    const y = base - h;
+    const esActual = mes === mesHoy;
     return `
-      <div class="tendencia-moneda">
-        <div class="tendencia-titulo">Gasto mensual en ${esc(moneda)}</div>
-        <svg viewBox="0 0 ${W} ${H}" class="tendencia-svg" role="img" aria-label="Gasto mensual en ${esc(moneda)}, últimos 6 meses">
-          <line x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}" class="teje"></line>
-          ${barras}
-        </svg>
-      </div>`;
+      <g>
+        <title>${nombreMes(mes)}: ${fmt(v, monedaTendencia)}${esActual ? ' (mes en curso)' : ''}</title>
+        <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" class="tbar${esActual ? ' actual' : ''}"></rect>
+        ${v ? `<text x="${x + w / 2}" y="${Math.max(y - 5, 10)}" class="tval">${fmtCorto(v)}</text>` : ''}
+        <text x="${x + w / 2}" y="${H - 8}" class="tlab">${nombreMes(mes).slice(0, 3)}</text>
+      </g>`;
   }).join('');
+
+  $('tendencia').innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="tendencia-svg" role="img" aria-label="Gasto mensual en ${esc(monedaTendencia)}, últimos 6 meses">
+      <line x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}" class="teje"></line>
+      ${barras}
+    </svg>
+    <div class="muted-note">El último mes está en curso, así que la barra va a seguir creciendo.</div>`;
 }
+
+$('monedasTendencia').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip');
+  if (!b) return;
+  monedaTendencia = b.dataset.moneda;
+  renderTendencia();
+});
+
+// ---------- Prestado ----------
+// Un préstamo es un Gasto marcado como tal. Saldarlo no borra nada: escribe una
+// marca en Config. La plata que vuelve se anota como Ingreso, como cualquier otra.
+function prestamosActivos() {
+  return movimientos
+    .filter(m => m.tipo === 'Gasto' && esPrestamo(m))
+    .sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+}
+
+function renderPrestado() {
+  const todos = prestamosActivos();
+  const activos = todos.filter(m => !estaDevuelto(m));
+  const devueltos = todos.filter(estaDevuelto).slice(0, 12);
+
+  const porMoneda = {};
+  activos.forEach(m => { porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + (Number(m.monto) || 0); });
+  const monedas = Object.entries(porMoneda).sort((a, b) => b[1] - a[1]);
+
+  $('prestadoTotales').innerHTML = monedas.length
+    ? monedas.map(([mon, v]) => `<div class="hero-monto">${fmt(v, mon)}</div>`).join('') +
+      `<div class="hero-sub">${activos.length} préstamo${activos.length === 1 ? '' : 's'} sin volver${devueltos.length ? ` · ${devueltos.length} ya devuelto${devueltos.length === 1 ? '' : 's'}` : ''}</div>`
+    : '<div class="hero-monto">Nada</div><div class="hero-sub">No le prestaste plata a nadie</div>';
+
+  $('prestadoLista').innerHTML = activos.map(m => htmlPrestamo(m, false)).join('');
+  $('prestadoDevueltos').innerHTML = devueltos.length
+    ? `<div class="card-title" style="margin-top:20px">Devueltos</div>` + devueltos.map(m => htmlPrestamo(m, true)).join('')
+    : '';
+}
+
+function htmlPrestamo(m, devuelto) {
+  const persona = personaDe(m);
+  return `
+    <div class="prestamo-card${devuelto ? ' devuelto' : ''}" data-id="${esc(m.id)}">
+      <div class="prestamo-top">
+        <div class="avatar">${esc(iniciales(persona))}</div>
+        <div class="prestamo-info">
+          <div class="prestamo-nombre">${esc(persona)}</div>
+          <div class="prestamo-fecha">${devuelto ? 'Devuelto' : 'Prestado'} el ${esc(fechaCorta(soloFecha(m.fecha)))} · ${esc(m.medioPago || '')}</div>
+        </div>
+        <div class="prestamo-monto">
+          <div class="m">${fmt(m.monto)}</div>
+          <div class="c">${esc(m.moneda)}</div>
+        </div>
+      </div>
+      <button type="button" class="prestamo-saldar" data-saldar="${esc(m.id)}">
+        ${devuelto ? 'Marcar como no devuelto' : 'Marcar como devuelto ✓'}
+      </button>
+    </div>`;
+}
+
+$('view-prestado').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-saldar]');
+  if (btn) {
+    const id = btn.dataset.saldar;
+    const mov = movimientos.find(m => m.id === id);
+    if (!mov) return;
+    try {
+      guardarConfig(claveDevuelto(id), estaDevuelto(mov) ? '' : fechaLocalStr(new Date()));
+      vibrar(15);
+      toast(estaDevuelto(mov) ? `${personaDe(mov)} te devolvió` : 'Vuelve a figurar como prestado');
+      renderPrestado();
+    } catch (err) {
+      toast(`No pude guardar: ${err.message}`, 6000);
+    }
+    return;
+  }
+  const card = e.target.closest('.prestamo-card');
+  if (card) {
+    const mov = movimientos.find(m => m.id === card.dataset.id);
+    if (mov) abrirEdicion(mov);
+  }
+});
+
+$('prestarBtn').addEventListener('click', () => {
+  cancelarEdicion();
+  mostrarVista('cargar');
+  aplicarTipo('Gasto');
+  seleccionarCategoria('Finanzas', 'Préstamos');
+  actualizarBloquePrestamo();
+  $('monto').focus();
+});
 
 // ---------- Ajustar saldo ----------
 function abrirAjuste(cuenta) {
@@ -1602,7 +2082,7 @@ function init() {
   actualizarFechaHint();
   $('moneda').value = estado.moneda;
   $('monedaDestino').value = estado.monedaDestino;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, (m) => { estado.medio = m; });
+  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
   renderMedioChips('medioChipsDestino', estado.monedaDestino, estado.medioDestino, (m) => { estado.medioDestino = m; });
 
   // primero lo que ya tenemos en el celu, al instante

@@ -15,10 +15,7 @@
 <header>
   <div class="brand">
     <span class="brand-icon">🥭</span>
-    <div>
-      <h1>Mango</h1>
-      <div class="tagline">plata, sin drama</div>
-    </div>
+    <h1>Mango</h1>
   </div>
   <div class="header-actions">
     <button type="button" id="syncPill" class="sync-pill" hidden></button>
@@ -29,71 +26,39 @@
 
 <main>
   <section id="view-cargar" class="view active">
-    <div class="card">
-      <div id="bannerEdicion" class="banner oculto">
-        <span>✏️ Editando movimiento</span>
-        <span class="banner-btns">
-          <button type="button" id="duplicarBtn" title="Crear una copia con fecha de hoy">Duplicar hoy</button>
-          <button type="button" id="borrarEdicionBtn" class="peligro">Borrar</button>
-          <button type="button" id="cancelarEdicionBtn">Cancelar</button>
-        </span>
-      </div>
-      <div id="bannerLigar" class="banner banner-ligar oculto">
-        <span id="bannerLigarTexto">🔗 Ligando otro cargo</span>
-        <span class="banner-btns">
-          <button type="button" id="cancelarLigarBtn">Listo</button>
-        </span>
-      </div>
+    <div id="bannerEdicion" class="banner oculto">
+      <span>✏️ Editando movimiento</span>
+      <span class="banner-btns">
+        <button type="button" id="duplicarBtn" title="Crear una copia con fecha de hoy">Duplicar hoy</button>
+        <button type="button" id="borrarEdicionBtn" class="peligro">Borrar</button>
+        <button type="button" id="cancelarEdicionBtn">Cancelar</button>
+      </span>
+    </div>
+    <div id="bannerLigar" class="banner banner-ligar oculto">
+      <span id="bannerLigarTexto">🔗 Ligando otro cargo</span>
+      <span class="banner-btns">
+        <button type="button" id="cancelarLigarBtn">Listo</button>
+      </span>
+    </div>
 
-      <div class="tipo-toggle" id="tipoToggle">
-        <button class="tipo-btn active" data-tipo="Gasto">💸 Gasto</button>
-        <button class="tipo-btn" data-tipo="Ingreso">💰 Ingreso</button>
-        <button class="tipo-btn" data-tipo="Transferencia">🔁 Transferencia</button>
-      </div>
+    <div class="tipo-toggle" id="tipoToggle">
+      <button class="tipo-btn active" data-tipo="Gasto">Gasto</button>
+      <button class="tipo-btn" data-tipo="Ingreso">Ingreso</button>
+      <button class="tipo-btn" data-tipo="Transferencia">Pase</button>
+    </div>
 
-      <label>Fecha</label>
-      <div class="chip-row" id="fechaChips">
-        <button type="button" class="chip active" data-dias="0">Hoy</button>
-        <button type="button" class="chip" data-dias="1">Ayer</button>
-        <button type="button" class="chip" data-dias="2">Antes de ayer</button>
-        <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
+    <!-- El monto es el protagonista: entra completo con el teclado abierto -->
+    <div class="card monto-card">
+      <div class="monto-row">
+        <label for="monto" class="sr-only">Monto</label>
+        <input type="text" id="monto" inputmode="decimal" enterkeyhint="done" placeholder="0" autocomplete="off">
+        <select id="moneda" class="moneda-sel" aria-label="Moneda">
+          <option value="AUD">AUD</option>
+          <option value="EUR">EUR</option>
+          <option value="ARS">ARS</option>
+          <option value="USD">USD</option>
+        </select>
       </div>
-      <input type="date" id="fecha" class="fecha-custom oculto">
-      <div class="fecha-hint" id="fechaHint"></div>
-
-      <label id="labelCuenta">Cuenta</label>
-      <div class="row">
-        <div>
-          <select id="moneda">
-            <option value="AUD">AUD</option>
-            <option value="EUR">EUR</option>
-            <option value="ARS">ARS</option>
-            <option value="USD">USD</option>
-          </select>
-        </div>
-        <div class="chip-row" id="medioChips"></div>
-      </div>
-
-      <div id="bloqueTransferencia" class="oculto">
-        <label>Cuenta destino</label>
-        <div class="row">
-          <div>
-            <select id="monedaDestino">
-              <option value="AUD">AUD</option>
-              <option value="EUR">EUR</option>
-              <option value="ARS">ARS</option>
-              <option value="USD">USD</option>
-            </select>
-          </div>
-          <div class="chip-row" id="medioChipsDestino"></div>
-        </div>
-        <label for="montoRecibido">Monto recibido</label>
-        <input type="text" id="montoRecibido" inputmode="decimal" enterkeyhint="done" placeholder="0">
-        <div class="tasa-hint" id="tasaHint"></div>
-      </div>
-
-      <label for="monto">Monto</label>
-      <input type="text" id="monto" inputmode="decimal" enterkeyhint="done" placeholder="0">
       <div class="ops" id="opsMonto">
         <button type="button" data-op="+">+</button>
         <button type="button" data-op="-">−</button>
@@ -102,21 +67,62 @@
         <button type="button" data-op="borrar" aria-label="Borrar último caracter">⌫</button>
       </div>
       <div class="calc-hint" id="calcHint"></div>
+    </div>
 
-      <div id="bloqueCategoria">
-        <label>Categoría</label>
-        <div class="chip-grid" id="categoriaChips"></div>
-        <div class="chip-row" id="subcategoriaChips"></div>
+    <div id="bloqueCategoria">
+      <div class="seccion-label">Categoría</div>
+      <div class="chip-grid" id="categoriaChips"></div>
+      <div class="chip-row" id="subcategoriaChips"></div>
+    </div>
+
+    <div id="bloqueTransferencia" class="card oculto">
+      <div class="seccion-label">Cuenta destino</div>
+      <div class="row">
+        <select id="monedaDestino" aria-label="Moneda destino">
+          <option value="AUD">AUD</option>
+          <option value="EUR">EUR</option>
+          <option value="ARS">ARS</option>
+          <option value="USD">USD</option>
+        </select>
+        <div class="chip-row" id="medioChipsDestino"></div>
       </div>
+      <label for="montoRecibido">Monto recibido</label>
+      <input type="text" id="montoRecibido" inputmode="decimal" enterkeyhint="done" placeholder="0">
+      <div class="tasa-hint" id="tasaHint"></div>
+    </div>
 
-      <label for="nota">Nota (opcional)</label>
-      <input type="text" id="nota" list="notasSugeridas" enterkeyhint="done" placeholder="Ej: supermercado Coles" autocomplete="off">
-      <datalist id="notasSugeridas"></datalist>
+    <div id="bloquePrestamo" class="oculto">
+      <div class="seccion-label">¿A quién le prestás?</div>
+      <div class="chip-row" id="personaChips"></div>
+      <input type="text" id="persona" list="personasSugeridas" placeholder="Nombre" autocomplete="off">
+      <datalist id="personasSugeridas"></datalist>
+    </div>
 
-      <div id="ligarRow" class="ligar-row oculto">
-        <button type="button" id="ligarBtn" class="link-btn">🔗 Ligar otro cargo a este gasto</button>
-        <div class="muted-note">Para cuando un solo gasto sale como varios cargos en la tarjeta (envío + propina, dos pagos, etc.).</div>
+    <div class="chip-row notas-chips" id="notasChips"></div>
+    <input type="text" id="nota" list="notasSugeridas" enterkeyhint="done" placeholder="Nota (opcional)" autocomplete="off">
+    <datalist id="notasSugeridas"></datalist>
+
+    <!-- Fecha y cuenta casi nunca cambian: una sola línea que se abre si hace falta -->
+    <button type="button" class="contexto" id="contextoBtn" aria-expanded="false">
+      <span id="contextoTexto">Hoy · AUD Banco</span>
+      <span class="contexto-flecha">▾</span>
+    </button>
+    <div class="card contexto-panel oculto" id="contextoPanel">
+      <div class="seccion-label">Fecha</div>
+      <div class="chip-row" id="fechaChips">
+        <button type="button" class="chip active" data-dias="0">Hoy</button>
+        <button type="button" class="chip" data-dias="1">Ayer</button>
+        <button type="button" class="chip" data-dias="2">Antes de ayer</button>
+        <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
       </div>
+      <input type="date" id="fecha" class="fecha-custom oculto">
+      <div class="seccion-label" id="labelCuenta">Cuenta</div>
+      <div class="chip-row" id="medioChips"></div>
+    </div>
+
+    <div id="ligarRow" class="ligar-row oculto">
+      <button type="button" id="ligarBtn" class="link-btn">🔗 Ligar otro cargo</button>
+      <div class="muted-note">Cuando un gasto sale como varios cargos: envío, propina, dos pagos.</div>
     </div>
 
     <div class="card ultimos-card">
@@ -126,58 +132,72 @@
   </section>
 
   <section id="view-movimientos" class="view">
-    <input type="search" id="buscar" placeholder="Buscar en notas y categorías" autocomplete="off">
+    <input type="search" id="buscar" placeholder="Buscar nota, comercio o categoría" autocomplete="off">
     <div class="filtros">
-      <select id="filtroTipo">
-        <option value="">Todos los tipos</option>
-        <option value="Gasto">💸 Gastos</option>
-        <option value="Ingreso">💰 Ingresos</option>
-        <option value="Transferencia">🔁 Transferencias</option>
+      <select id="filtroMes" aria-label="Mes"></select>
+      <select id="filtroTipo" aria-label="Tipo">
+        <option value="">Todos</option>
+        <option value="Gasto">Gastos</option>
+        <option value="Ingreso">Ingresos</option>
+        <option value="Transferencia">Pases</option>
       </select>
-      <select id="filtroMoneda">
-        <option value="">Todas las monedas</option>
+      <select id="filtroMoneda" aria-label="Moneda">
+        <option value="">Monedas</option>
         <option value="AUD">AUD</option>
         <option value="EUR">EUR</option>
         <option value="ARS">ARS</option>
         <option value="USD">USD</option>
       </select>
-      <select id="filtroMes"></select>
     </div>
 
     <div id="totales" class="totales"></div>
-
     <div id="listaMovimientos"></div>
     <button id="mostrarMasBtn" class="secondary ancho oculto">Mostrar más</button>
   </section>
 
   <section id="view-activos" class="view">
+    <div class="mes-nav">
+      <button type="button" id="mesAnteriorBtn" class="icon-btn" aria-label="Mes anterior">‹</button>
+      <div class="mes-titulo-wrap">
+        <div class="mes-titulo" id="mesTitulo"></div>
+        <div class="mes-sub" id="mesSub"></div>
+      </div>
+      <button type="button" id="mesSiguienteBtn" class="icon-btn" aria-label="Mes siguiente">›</button>
+    </div>
+
     <div class="card">
-      <div class="card-title">Saldo por cuenta <span class="hint-inline">tocá una para ajustarla al saldo real</span></div>
+      <div class="card-title">Saldo por cuenta <span class="hint-inline">tocá para ajustar</span></div>
       <div id="saldosCuentas"></div>
     </div>
 
-    <div class="card">
-      <div class="mes-nav">
-        <button type="button" id="mesAnteriorBtn" class="icon-btn">‹</button>
-        <div class="card-title mes-titulo" id="mesTitulo"></div>
-        <button type="button" id="mesSiguienteBtn" class="icon-btn">›</button>
-      </div>
-      <div id="resumenMes"></div>
-    </div>
+    <div id="resumenMes"></div>
+    <div id="ritmoMes"></div>
+    <div id="noComputado"></div>
 
     <div class="card">
       <div class="card-title">Últimos 6 meses</div>
+      <div class="chip-row chips-moneda" id="monedasTendencia"></div>
       <div id="tendencia"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">Patrimonio invertido (aprox.)</div>
+      <div class="card-title">Patrimonio invertido</div>
       <div class="row">
         <input type="text" id="patrimonioInput" inputmode="decimal" placeholder="0">
         <button id="guardarPatrimonioBtn" class="secondary">Guardar</button>
       </div>
-      <div class="muted-note">Valor manual: lo actualizás vos cuando te acordás, no está conectado a nada.</div>
+      <div class="muted-note">Valor manual: lo actualizás vos, no está conectado a nada.</div>
     </div>
+  </section>
+
+  <section id="view-prestado" class="view">
+    <div class="card hero-card">
+      <div class="card-title">Prestado y sin volver</div>
+      <div id="prestadoTotales"></div>
+    </div>
+    <button type="button" class="primary ancho" id="prestarBtn">+ Prestar plata</button>
+    <div id="prestadoLista"></div>
+    <div id="prestadoDevueltos"></div>
   </section>
 </main>
 
@@ -186,21 +206,22 @@
 </div>
 
 <nav class="tabs">
-  <button class="tab-btn active" data-view="cargar"><span class="tab-ico">➕</span>Cargar</button>
+  <button class="tab-btn active" data-view="cargar"><span class="tab-ico">⚡</span>Cargar</button>
   <button class="tab-btn" data-view="movimientos"><span class="tab-ico">📋</span>Movimientos</button>
-  <button class="tab-btn" data-view="activos"><span class="tab-ico">📊</span>Resumen</button>
+  <button class="tab-btn" data-view="activos"><span class="tab-ico">◑</span>Resumen</button>
+  <button class="tab-btn" data-view="prestado"><span class="tab-ico">🤝</span>Prestado</button>
 </nav>
 
 <div id="configOverlay" class="overlay">
   <div class="sheet">
     <div class="sheet-header">
-      <h2>Configuración</h2>
-      <button id="cerrarConfigBtn" class="cerrar-x" title="Cerrar">✕</button>
+      <h2>Conexión con tu planilla</h2>
+      <button id="cerrarConfigBtn" class="cerrar-x" title="Cerrar" aria-label="Cerrar">✕</button>
     </div>
-    <label for="apiUrlInput">URL de tu Apps Script (Web App)</label>
+    <label for="apiUrlInput">Dirección de la planilla</label>
     <input type="text" id="apiUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
-    <label for="tokenInput">Token (opcional, el mismo que pusiste en la pestaña Config)</label>
-    <input type="text" id="tokenInput" placeholder="vacío si no usás token" autocomplete="off">
+    <label for="tokenInput">Clave (opcional)</label>
+    <input type="text" id="tokenInput" placeholder="vacío si no usás clave" autocomplete="off">
     <button class="cerrar-sheet" id="guardarConfigBtn">Guardar</button>
     <button class="link-btn" id="limpiarCacheBtn">Volver a bajar todo el historial</button>
   </div>
@@ -210,19 +231,19 @@
   <div class="sheet">
     <div class="sheet-header">
       <h2 id="ajusteTitulo">Ajustar saldo</h2>
-      <button id="cerrarAjusteBtn" class="cerrar-x" title="Cerrar">✕</button>
+      <button id="cerrarAjusteBtn" class="cerrar-x" title="Cerrar" aria-label="Cerrar">✕</button>
     </div>
     <div class="muted-note" id="ajusteEstimado"></div>
     <label for="ajusteInput">Saldo real ahora</label>
     <input type="text" id="ajusteInput" inputmode="decimal" placeholder="0">
-    <div class="muted-note">Mango va a mover el punto de partida de esta cuenta para que el saldo coincida con lo que ves en el banco. No toca ningún movimiento.</div>
+    <div class="muted-note">Mango mueve el punto de partida de esta cuenta para que coincida con lo que ves en el banco. No toca ningún movimiento.</div>
     <button class="cerrar-sheet" id="guardarAjusteBtn">Guardar</button>
   </div>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="avisoVersion" class="aviso-version oculto">
-  Hay una versión nueva de Mango
+  Hay una versión nueva
   <button type="button" id="actualizarBtn">Actualizar</button>
 </div>
 
