@@ -80,6 +80,7 @@ let ultimaConfirmacion = 0;  // cuándo la planilla confirmó por última vez un
 let sincronizando = false;
 let errorSync = '';          // último error que devolvió la planilla al subir la cola
 let campoMonto = null;       // último campo de monto enfocado (para los botones + − × ÷)
+let forzarHistorial = false; // pedido explícito de volver a bajar todo el historial
 const indiceBusqueda = new Map(); // id -> texto normalizado, para no re-normalizar 2800 filas por tecla
 
 let estado = {
@@ -424,11 +425,11 @@ $('guardarConfigBtn').addEventListener('click', () => {
   toast('Configuración guardada');
   init();
 });
+// Pide bajar todo de nuevo SIN borrar antes: si la bajada falla por señal, el
+// celu se queda con lo que ya tenía. Borrar primero y bajar después deja al
+// usuario sin datos y sin forma de recuperarlos hasta que vuelva la conexión.
 $('limpiarCacheBtn').addEventListener('click', () => {
-  localStorage.removeItem(LS_CACHE_MIGRADOS);
-  localStorage.removeItem(LS_CACHE_RECIENTES);
-  localStorage.removeItem(LS_HIST_VER);
-  migradosMem = null;
+  forzarHistorial = true;
   $('configOverlay').classList.remove('active');
   toast('Bajando todo de nuevo…');
   cargarTodo();
@@ -1255,7 +1256,7 @@ async function cargarTodo() {
   } catch (err) {
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
     else if (!esErrorDeRed(err)) toast(`Algo falló al actualizar: ${err.message}`, 8000);
-    else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Revisá la URL en ⚙️');
+    else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Puede ser la señal; si sigue, revisá la dirección en ⚙️', 7000);
     return; // sin red no tiene sentido seguir; queda lo cacheado
   }
 
@@ -1265,10 +1266,11 @@ async function cargarTodo() {
   const verServidor = String(config.historialVersion || '');
   const verLocal = localStorage.getItem(LS_HIST_VER) || '';
   const desincronizado = (totalServidor > 0 && localTotal !== totalServidor) || verServidor !== verLocal;
-  if (!hayMigradosCacheados || desincronizado) {
+  if (!hayMigradosCacheados || desincronizado || forzarHistorial) {
     try {
       const n = await descargarHistorial(totalServidor);
       localStorage.setItem(LS_HIST_VER, verServidor);
+      forzarHistorial = false;
       toast(hayMigradosCacheados ? 'Datos sincronizados' : `Historial listo: ${n} movimientos`);
     } catch (err) {
       toast('No pude bajar todo el historial. Probá de nuevo con mejor señal.');
