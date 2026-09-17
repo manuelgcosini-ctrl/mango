@@ -1,4 +1,4 @@
-const VERSION = 'v10';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v11';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -1145,8 +1145,31 @@ function migradosLocales() {
   return migradosMem;
 }
 
+// La planilla puede devolver el monto como número o como texto, y el texto puede traer
+// coma decimal ("4,21") si la hoja lo guardó como texto en vez de número. Number("4,21")
+// da NaN, que después cae en 0: el movimiento aparece en la lista pero vale cero, y se
+// lleva puesto los totales del mes, los saldos por cuenta y lo prestado. Se normaliza
+// una sola vez al entrar, en vez de parchear cada cuenta que lo usa.
+function numeroPlanilla(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  if (v === null || v === undefined) return 0;
+  const limpio = String(v).replace(/\s/g, '').replace(/[^\d,.-]/g, '');
+  if (!limpio) return 0;
+  // si hay coma es el decimal y el punto es separador de miles; si no, manda el punto
+  const n = Number(limpio.includes(',') ? limpio.replace(/\./g, '').replace(',', '.') : limpio);
+  return isFinite(n) ? n : 0;
+}
+
+function normalizarMovimiento(m) {
+  m.monto = numeroPlanilla(m.monto);
+  if (m.montoRecibido !== '' && m.montoRecibido !== null && m.montoRecibido !== undefined) {
+    m.montoRecibido = numeroPlanilla(m.montoRecibido);
+  }
+  return m;
+}
+
 function combinar(recientes, migrados) {
-  movimientos = aplicarCola([...recientes, ...migrados]);
+  movimientos = aplicarCola([...recientes, ...migrados].map(normalizarMovimiento));
   indiceBusqueda.clear();
   ordenar();
   movSucio = true;
