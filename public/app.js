@@ -1,4 +1,4 @@
-const VERSION = 'v11';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v12';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -87,6 +87,7 @@ let sincronizando = false;
 let errorSync = '';          // último error que devolvió la planilla al subir la cola
 let campoMonto = null;       // último campo de monto enfocado (para los botones + − × ÷)
 let forzarHistorial = false; // pedido explícito de volver a bajar todo el historial
+let ultimoError = '';        // para el diagnóstico de ⚙️: qué fue lo último que falló
 const indiceBusqueda = new Map(); // id -> texto normalizado, para no re-normalizar 2800 filas por tecla
 
 let estado = {
@@ -99,7 +100,18 @@ let estado = {
   subcategoria: null
 };
 
+const SALTO = String.fromCharCode(10);
 const $ = (id) => document.getElementById(id);
+
+// Sin esto, una excepción al pintar la lista deja la pantalla vacía y no avisa nada:
+// la app parece "no cargar los movimientos" cuando en realidad se rompió al dibujarlos.
+function anotarError(origen, e) {
+  const msg = (e && (e.message || e.reason?.message || e.reason)) || e || 'error sin detalle';
+  ultimoError = `${new Date().toLocaleTimeString('es-AR')} ${origen}: ${String(msg).slice(0, 160)}`;
+  try { $('toast').textContent = 'Algo se rompió: ' + String(msg).slice(0, 80); $('toast').classList.add('show'); } catch (err) { /* ni el toast anda */ }
+}
+window.addEventListener('error', (e) => anotarError('js', e.error || e));
+window.addEventListener('unhandledrejection', (e) => anotarError('promesa', e));
 
 function apiUrl() { return localStorage.getItem(LS_API_URL) || ''; }
 function token() { return localStorage.getItem(LS_TOKEN) || ''; }
@@ -232,6 +244,28 @@ function sinAcentos(s) {
 }
 
 function esMigrado(m) { return !!(m && m.id && String(m.id).startsWith('mig-')); }
+
+// Lo que hay que saber para entender por qué la app no muestra lo que tendría que mostrar,
+// en una pantalla que se puede fotografiar y mandar. Sin esto hay que adivinar.
+function renderDiagnostico() {
+  const caja = $('diagBox');
+  if (!caja) return;
+  const cuenta = (k) => { try { const v = localStorage.getItem(k); return v === null ? 'sin cache' : JSON.parse(v).length; } catch (err) { return 'cache roto'; } };
+  const url = apiUrl();
+  const recientesMem = movimientos.filter(m => !esMigrado(m)).length;
+  const maxFecha = movimientos.reduce((a, m) => (soloFecha(m.fecha) > a ? soloFecha(m.fecha) : a), '');
+  caja.textContent = [
+    `version      ${VERSION}`,
+    `en memoria   ${movimientos.length}  (historial ${movimientos.length - recientesMem} / recientes ${recientesMem})`,
+    `cache        recientes ${cuenta(LS_CACHE_RECIENTES)} / historial ${cuenta(LS_CACHE_MIGRADOS)}`,
+    `mas reciente ${maxFecha || 'ninguno'}`,
+    `sin subir    ${leerCola().length}`,
+    `ultima sync  ${ultimaSync ? new Date(ultimaSync).toLocaleTimeString('es-AR') : 'nunca'}`,
+    `direccion    ${url ? url.replace(/\/s\/[^/]+\//, '/s/…/') : 'SIN CONFIGURAR'}`,
+    `ultimo error ${ultimoError || 'ninguno'}`
+  ].join(SALTO);
+}
+
 function claveGrupo(m) { return m.grupo || m.id; }
 
 // ---------- Qué es gasto de verdad y qué no ----------
@@ -417,6 +451,7 @@ function actualizarTasaHint() {
 $('configBtn').addEventListener('click', () => {
   $('apiUrlInput').value = apiUrl();
   $('tokenInput').value = token();
+  renderDiagnostico();
   $('configOverlay').classList.add('active');
 });
 $('cerrarConfigBtn').addEventListener('click', () => $('configOverlay').classList.remove('active'));
@@ -1264,11 +1299,13 @@ async function bajarRecientes(total) {
     const pag = await apiGet({ action: 'movimientos', desde, limite: fin - desde }, TIMEOUT_ARRANQUE);
     const filas = (pag && pag.filas) || [];
     if (!filas.length) break;
-    // el historial migrado vive arriba y lo reciente abajo: buscamos el borde
-    let corte = filas.length;
-    while (corte > 0 && !esMigrado(filas[corte - 1])) corte--;
-    for (let i = corte; i < filas.length; i++) recientes.push(filas[i]);
-    if (corte > 0) return recientes;  // encontramos dónde termina el historial
+    // Se lleva TODO lo que no sea historial de esta tanda. Antes cortaba en el último
+    // "mig-" contado desde abajo, así que una sola fila del historial traspapelada entre
+    // lo reciente (por ejemplo una renumerada a mano) dejaba afuera todo lo que estaba
+    // encima y la app arrancaba casi vacía, sin decir nada.
+    recientes.push(...filas.filter(m => !esMigrado(m)));
+    // si la tanda ya empieza dentro del historial, el bloque reciente quedó cubierto
+    if (esMigrado(filas[0])) break;
     fin = desde;
   }
   return recientes;
@@ -1338,6 +1375,7 @@ async function cargarTodoInterno(cachedRecientes) {
       }
     }
   } catch (err) {
+    anotarError('carga', err);
     // ojo con el orden: esErrorDeRed() da true para todo lo que no sea ApiError, así que
     // si se pregunta antes que por el timeout se come el caso y no se avisa nada.
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);

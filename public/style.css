@@ -504,3 +504,17 @@ body.vista-cargar .toast { bottom: calc(148px + env(safe-area-inset-bottom)); }
 
 .fecha-hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
 .fecha-hint::first-letter { text-transform: uppercase; }
+
+/* Diagnóstico: para poder sacarle una foto y mandarla, en vez de adivinar qué pasa */
+.diag { margin-top: 10px; }
+.diag summary {
+  cursor: pointer; color: var(--muted); font-size: 13px;
+  padding: 8px 0; min-height: var(--tap); display: flex; align-items: center;
+}
+.diag pre {
+  margin: 0; padding: 10px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
