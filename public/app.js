@@ -1,4 +1,4 @@
-const VERSION = 'v13';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v14';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -251,6 +251,50 @@ function esMigrado(m) { return !!(m && m.id && String(m.id).startsWith('mig-'));
 
 // Lo que hay que saber para entender por qué la app no muestra lo que tendría que mostrar,
 // en una pantalla que se puede fotografiar y mandar. Sin esto hay que adivinar.
+// Un fetch bloqueado por CORS y uno sin internet son indistinguibles desde JavaScript:
+// los dos tiran "Failed to fetch". Pero se pueden separar probando primero algo del
+// propio dominio: si eso anda y la planilla no, el problema es de la planilla, no de la
+// señal. Eso es exactamente lo que no podiamos distinguir a ojo.
+async function probarConexion() {
+  const caja = $('diagBox');
+  const decir = (t) => { if (caja) caja.textContent = t; };
+  if (!apiUrl()) { decir('No hay ninguna dirección guardada todavía.'); return; }
+
+  decir('Probando…');
+  let hayInternet = false;
+  try {
+    const r = await fetch('icon.svg?probar=' + Date.now(), { cache: 'no-store' });
+    hayInternet = r.ok;
+  } catch (err) { hayInternet = false; }
+
+  if (!hayInternet) {
+    decir('Sin internet.' + SALTO + SALTO + 'No llego ni a mi propio servidor, así que no es tu planilla: es la conexión del celu.');
+    return;
+  }
+
+  try {
+    const data = await apiGet({ action: 'movimientos', desde: 0, limite: 1 }, 25000);
+    const total = (data && data.total !== undefined) ? data.total
+                : (Array.isArray(data) ? data.length : '?');
+    decir('Todo bien.' + SALTO + SALTO + 'Tu planilla contestó y dice que tiene ' + total + ' movimientos.'
+        + SALTO + 'Si aun así no ves nada, cerrá y abrí la app.');
+  } catch (err) {
+    if (err instanceof ApiError) {
+      decir('Tu planilla contestó, pero con un error:' + SALTO + SALTO + err.message
+          + SALTO + SALTO + 'Suele ser la clave: si en Config pusiste un token, tiene que estar igual acá arriba.');
+    } else if (esTimeout(err)) {
+      decir('Internet anda, pero tu planilla tardó más de 25 segundos en contestar.'
+          + SALTO + SALTO + 'Probá otra vez con mejor señal.');
+    } else {
+      decir('Internet anda, pero tu planilla NO deja entrar a la app.' + SALTO + SALTO
+          + 'Es el permiso de la implementación. En Apps Script:' + SALTO
+          + 'Implementar → Administrar implementaciones → el lápiz →' + SALTO
+          + 'Quién tiene acceso: CUALQUIER USUARIO → Implementar.' + SALTO + SALTO
+          + 'Ojo: "Cualquier usuario con una cuenta de Google" NO sirve.');
+    }
+  }
+}
+
 function renderDiagnostico() {
   const caja = $('diagBox');
   if (!caja) return;
@@ -458,6 +502,7 @@ $('configBtn').addEventListener('click', () => {
   renderDiagnostico();
   $('configOverlay').classList.add('active');
 });
+$('probarBtn').addEventListener('click', probarConexion);
 $('cerrarConfigBtn').addEventListener('click', () => $('configOverlay').classList.remove('active'));
 $('guardarConfigBtn').addEventListener('click', () => {
   const urlNueva = $('apiUrlInput').value.trim();
