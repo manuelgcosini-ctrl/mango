@@ -506,13 +506,12 @@ $('tipoToggle').addEventListener('click', (e) => {
 });
 
 // ---------- Fecha ----------
-// la línea colapsada de arriba del todo: "Hoy · AUD Banco"
+// La fecha elegida se escribe completa debajo de los chips: si la app quedó
+// abierta desde ayer y "Hoy" envejeció, se ve enseguida.
 function actualizarContexto() {
   const v = $('fecha').value;
-  const chip = document.querySelector('#fechaChips .chip.active');
-  const cuando = (chip && chip.dataset.dias !== undefined) ? chip.textContent.trim()
-    : (fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha');
-  $('contextoTexto').textContent = `${cuando} · ${estado.moneda} ${estado.medio}`;
+  $('fechaHint').textContent = fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha con "Otra 📅"';
+  $('contextoTexto').textContent = `${estado.moneda} ${estado.medio}`;
 }
 const actualizarFechaHint = actualizarContexto;
 
@@ -1241,12 +1240,21 @@ async function cargarTodo() {
     } else {
       const str = JSON.stringify(recientesServidor);
       if (str !== cachedRecientes) { // si no cambió nada, no se vuelve a ordenar ni a pintar
-        guardarLS(LS_CACHE_RECIENTES, str);
+        // Primero pintar, después guardar. Al revés, si el celu se queda sin
+        // espacio para el cache la excepción se lleva puesto el render y los
+        // movimientos nuevos no aparecen nunca, sin que nada lo diga.
         combinar(recientesServidor, migradosLocales());
+        try {
+          guardarLS(LS_CACHE_RECIENTES, str);
+        } catch (err) {
+          toast('Los datos están al día, pero no entran en la memoria del celu. '
+              + 'Probá "Volver a bajar todo el historial" en ⚙️', 8000);
+        }
       }
     }
   } catch (err) {
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
+    else if (!esErrorDeRed(err)) toast(`Algo falló al actualizar: ${err.message}`, 8000);
     else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Revisá la URL en ⚙️');
     return; // sin red no tiene sentido seguir; queda lo cacheado
   }

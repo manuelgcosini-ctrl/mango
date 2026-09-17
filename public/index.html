@@ -102,20 +102,23 @@
     <input type="text" id="nota" list="notasSugeridas" enterkeyhint="done" placeholder="Nota (opcional)" autocomplete="off">
     <datalist id="notasSugeridas"></datalist>
 
-    <!-- Fecha y cuenta casi nunca cambian: una sola línea que se abre si hace falta -->
+    <!-- La fecha se ve siempre: cargar gastos de días pasados es lo normal, no la excepción -->
+    <div class="seccion-label">Fecha</div>
+    <div class="chip-row" id="fechaChips">
+      <button type="button" class="chip active" data-dias="0">Hoy</button>
+      <button type="button" class="chip" data-dias="1">Ayer</button>
+      <button type="button" class="chip" data-dias="2">Antes de ayer</button>
+      <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
+    </div>
+    <input type="date" id="fecha" class="fecha-custom oculto">
+    <div class="fecha-hint" id="fechaHint"></div>
+
+    <!-- La cuenta sí cambia poco: una línea que se abre si hace falta -->
     <button type="button" class="contexto" id="contextoBtn" aria-expanded="false">
-      <span id="contextoTexto">Hoy · AUD Banco</span>
+      <span id="contextoTexto">AUD Banco</span>
       <span class="contexto-flecha">▾</span>
     </button>
     <div class="card contexto-panel oculto" id="contextoPanel">
-      <div class="seccion-label">Fecha</div>
-      <div class="chip-row" id="fechaChips">
-        <button type="button" class="chip active" data-dias="0">Hoy</button>
-        <button type="button" class="chip" data-dias="1">Ayer</button>
-        <button type="button" class="chip" data-dias="2">Antes de ayer</button>
-        <button type="button" class="chip" id="chipOtraFecha">Otra 📅</button>
-      </div>
-      <input type="date" id="fecha" class="fecha-custom oculto">
       <div class="seccion-label" id="labelCuenta">Cuenta</div>
       <div class="chip-row" id="medioChips"></div>
     </div>
