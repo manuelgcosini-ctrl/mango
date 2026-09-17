@@ -1,4 +1,4 @@
-const VERSION = 'v14';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v15';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -286,11 +286,30 @@ async function probarConexion() {
       decir('Internet anda, pero tu planilla tardó más de 25 segundos en contestar.'
           + SALTO + SALTO + 'Probá otra vez con mejor señal.');
     } else {
-      decir('Internet anda, pero tu planilla NO deja entrar a la app.' + SALTO + SALTO
-          + 'Es el permiso de la implementación. En Apps Script:' + SALTO
-          + 'Implementar → Administrar implementaciones → el lápiz →' + SALTO
-          + 'Quién tiene acceso: CUALQUIER USUARIO → Implementar.' + SALTO + SALTO
-          + 'Ojo: "Cualquier usuario con una cuenta de Google" NO sirve.');
+      // Hasta acá solo sabemos que el fetch normal falló, y eso tapa dos cosas muy
+      // distintas. Con mode:'no-cors' el navegador hace igual el viaje pero no deja
+      // leer la respuesta: si ese viaje SÍ llega, el servidor está vivo y contestando,
+      // y lo que falla es el permiso de lectura entre dominios. Si ni eso llega, el
+      // pedido no sale del celu (red, DNS, VPN, algo que bloquea a Google).
+      let llegaElViaje = false;
+      try {
+        await fetch(apiUrl() + '?action=config&probar=' + Date.now(), { mode: 'no-cors', cache: 'no-store' });
+        llegaElViaje = true;
+      } catch (e2) { llegaElViaje = false; }
+
+      if (llegaElViaje) {
+        decir('Tu planilla contesta, pero el navegador no me deja leer la respuesta.' + SALTO + SALTO
+            + 'El servidor está vivo: el pedido llega y vuelve. Lo que falta es el permiso'
+            + ' entre dominios (CORS).' + SALTO + SALTO
+            + 'Sacale una foto a esto y mandámelo: es un caso distinto al del permiso'
+            + ' de Apps Script, y se arregla de otra manera.');
+      } else {
+        decir('El pedido a tu planilla no sale del celu.' + SALTO + SALTO
+            + 'Mi servidor contesta, así que internet hay. Pero a script.google.com no llega'
+            + ' nada.' + SALTO + SALTO
+            + 'Suele ser la red donde estás (wifi con filtro o portal), una VPN, o un'
+            + ' bloqueador. Probá con los datos del celu en vez del wifi.');
+      }
     }
   }
 }
