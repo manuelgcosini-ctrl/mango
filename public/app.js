@@ -1,4 +1,4 @@
-const VERSION = 'v12';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v13';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -106,7 +106,11 @@ const $ = (id) => document.getElementById(id);
 // Sin esto, una excepción al pintar la lista deja la pantalla vacía y no avisa nada:
 // la app parece "no cargar los movimientos" cuando en realidad se rompió al dibujarlos.
 function anotarError(origen, e) {
-  const msg = (e && (e.message || e.reason?.message || e.reason)) || e || 'error sin detalle';
+  let msg = (e && (e.message || e.reason?.message || e.reason)) || e || 'error sin detalle';
+  // el mensaje del navegador no dice nada; lo traducimos a la causa que casi siempre es
+  if (String(msg).includes('Failed to fetch') || String(msg).includes('NetworkError')) {
+    msg = 'no pude ni empezar la llamada (revisá que el Apps Script esté publicado para "Cualquier usuario")';
+  }
   ultimoError = `${new Date().toLocaleTimeString('es-AR')} ${origen}: ${String(msg).slice(0, 160)}`;
   try { $('toast').textContent = 'Algo se rompió: ' + String(msg).slice(0, 80); $('toast').classList.add('show'); } catch (err) { /* ni el toast anda */ }
 }
@@ -1380,7 +1384,16 @@ async function cargarTodoInterno(cachedRecientes) {
     // si se pregunta antes que por el timeout se come el caso y no se avisa nada.
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
     else if (esTimeout(err)) toast('Tu planilla tardó demasiado en responder. Probá otra vez; si sigue pasando, hay que actualizar el Apps Script.', 8000);
-    else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Puede ser la señal; si sigue, revisá la dirección en ⚙️', 7000);
+    // "Failed to fetch" a los pocos segundos no es falta de señal: es que el navegador no
+    // pudo ni empezar la llamada. La causa habitual es que el Apps Script está publicado
+    // con acceso restringido, y entonces Google redirige al login y el navegador lo corta.
+    // Desde el navegador del celu la URL funciona igual (ahí hay sesión), así que sin este
+    // mensaje uno jura que la planilla anda bien y busca el problema donde no está.
+    else if (!cachedRecientes && !hayMigradosCacheados) {
+      toast('No pude conectar con tu planilla. Si la dirección es correcta, en Apps Script '
+          + 'poné Implementar → Administrar implementaciones → Quién tiene acceso: '
+          + 'Cualquier usuario.', 11000);
+    }
     return; // sin red no tiene sentido seguir; queda lo cacheado
   }
 
