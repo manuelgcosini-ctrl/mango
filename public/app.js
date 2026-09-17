@@ -14,6 +14,7 @@ const TIMEOUT_LARGO = 60000;     // para bajar tandas del historial, que tardan 
 // sola llamada por apertura: mejor esperar que fallar.
 const TIMEOUT_ARRANQUE = 45000;
 const PAGINA_HISTORIAL = 600;    // filas por tanda al bajar el historial
+const PAGINA_RECIENTES = 400;    // filas que se miran desde el final para encontrar lo reciente
 const PAGINA = 120;              // filas que se muestran de una en Movimientos antes de "Mostrar más"
 
 const MEDIOS_POR_MONEDA = {
@@ -1188,32 +1189,65 @@ function guardarConfig(clave, valor) {
 // se pasaban del timeout y quedaba silenciosamente sin historial. Cada tanda lee solo su rango.
 async function descargarHistorial(totalEsperado) {
   const migrados = [];
+  const sueltos = [];   // lo que no es del historial: antes se descartaba y se confiaba
+                        // en que "recientes" lo trajera igual; si no coincidían, se perdía
   let desde = 0;
   let total = totalEsperado || 0;
+  let completo = false;
 
   for (let vuelta = 0; vuelta < 60; vuelta++) {
     const pag = await apiGet({ action: 'movimientos', desde, limite: PAGINA_HISTORIAL }, TIMEOUT_LARGO);
 
     if (Array.isArray(pag)) { // backend viejo: ignora "desde" y manda todo junto
-      pag.filter(esMigrado).forEach(m => migrados.push(m));
+      pag.forEach(m => (esMigrado(m) ? migrados : sueltos).push(m));
       total = pag.length;
+      completo = true;
       break;
     }
 
     const filas = pag.filas || [];
     total = Number(pag.total) || total;
-    filas.filter(esMigrado).forEach(m => migrados.push(m));
+    filas.forEach(m => (esMigrado(m) ? migrados : sueltos).push(m));
     desde += filas.length;
-    if (!filas.length || desde >= total) break;
+    if (!filas.length || desde >= total) { completo = desde >= total; break; }
     toast(`Bajando tu historial… ${desde} de ${total}`, 60000);
+  }
+
+  // Un historial a medias NO pisa al que ya está guardado. Antes cualquier respuesta
+  // corta (o vacía) se escribía igual y se llevaba puesto el historial entero, y en la
+  // apertura siguiente las cuentas no cerraban y volvía a intentarlo, otra vez a medias.
+  if (!completo || (total > 0 && migrados.length + sueltos.length < total)) {
+    throw new Error('la bajada quedó incompleta');
   }
 
   guardarLS(LS_CACHE_MIGRADOS, JSON.stringify(migrados, sinInternos));
   migradosMem = migrados;
-  let recientesActuales = [];
-  try { recientesActuales = JSON.parse(localStorage.getItem(LS_CACHE_RECIENTES) || '[]'); } catch (err) { /* cache roto: se rehace */ }
-  combinar(recientesActuales, migrados);
+  // la bajada completa es la foto buena de las dos partes, no solo del historial
+  guardarLS(LS_CACHE_RECIENTES, JSON.stringify(sueltos, sinInternos));
+  combinar(sueltos, migrados);
   return migrados.length;
+}
+
+// Trae solo el bloque reciente leyendo la hoja de atrás para adelante. Pedir "todos los
+// movimientos" (o "recientes") obliga al backend a leer y reformatear las miles de fechas
+// del historial en CADA apertura: con la planilla grande y el celu lejos eso se pasaba del
+// límite de espera, y la app se quedaba sin nada que mostrar.
+async function bajarRecientes(total) {
+  const recientes = [];
+  let fin = total;
+  for (let vuelta = 0; vuelta < 20 && fin > 0; vuelta++) {
+    const desde = Math.max(0, fin - PAGINA_RECIENTES);
+    const pag = await apiGet({ action: 'movimientos', desde, limite: fin - desde }, TIMEOUT_ARRANQUE);
+    const filas = (pag && pag.filas) || [];
+    if (!filas.length) break;
+    // el historial migrado vive arriba y lo reciente abajo: buscamos el borde
+    let corte = filas.length;
+    while (corte > 0 && !esMigrado(filas[corte - 1])) corte--;
+    for (let i = corte; i < filas.length; i++) recientes.push(filas[i]);
+    if (corte > 0) return recientes;  // encontramos dónde termina el historial
+    fin = desde;
+  }
+  return recientes;
 }
 
 async function cargarTodo() {
@@ -1234,20 +1268,32 @@ async function cargarTodoInterno(cachedRecientes) {
   let recientesServidor = null;
 
   try {
-    let data = await apiGet({ action: 'bootstrap' }, TIMEOUT_ARRANQUE);
-    if (!data || Array.isArray(data) || !('recientes' in data)) {
-      // backend viejo (sin bootstrap): hacemos las tres llamadas de antes
-      const [cats, cfg, rec] = await Promise.all([
-        apiGet({ action: 'categorias' }, TIMEOUT_ARRANQUE),
-        apiGet({ action: 'config' }, TIMEOUT_ARRANQUE),
-        apiGet({ action: 'movimientos', recientes: 1 }, TIMEOUT_ARRANQUE)
-      ]);
-      data = { categorias: cats, config: cfg, recientes: rec };
+    // Sonda de UNA fila: dice cuántas filas tiene la planilla y si el backend sabe leer
+    // por rango, sin obligarlo a tocar el historial. Es la llamada más barata que hay.
+    // Van las tres juntas porque categorías y config no dependen del total.
+    const [sonda, cats, cfg] = await Promise.all([
+      apiGet({ action: 'movimientos', desde: 0, limite: 1 }, TIMEOUT_ARRANQUE),
+      apiGet({ action: 'categorias' }, TIMEOUT_ARRANQUE),
+      apiGet({ action: 'config' }, TIMEOUT_ARRANQUE)
+    ]);
+
+    if (sonda && !Array.isArray(sonda) && 'total' in sonda) {
+      totalServidor = Number(sonda.total) || 0;
+      aplicarCategorias(cats);
+      aplicarConfig(cfg);
+      recientesServidor = await bajarRecientes(totalServidor);
+    } else if (Array.isArray(sonda)) {
+      // backend antiguo: ignora el rango y devuelve la hoja entera. Ya la tenemos acá,
+      // así que no hace falta pedirla otra vez.
+      aplicarCategorias(cats);
+      aplicarConfig(cfg);
+      recientesServidor = sonda.filter(m => !esMigrado(m));
+      totalServidor = sonda.length;
+      migradosMem = sonda.filter(esMigrado);
+      guardarLS(LS_CACHE_MIGRADOS, JSON.stringify(migradosMem, sinInternos));
+    } else {
+      throw new Error('la planilla respondió algo que no entiendo');
     }
-    aplicarCategorias(data.categorias);
-    aplicarConfig(data.config);
-    recientesServidor = data.recientes || [];
-    totalServidor = Number(data.total) || 0;
 
     if (ultimaConfirmacion > inicio) {
       // mientras esperábamos, la planilla confirmó algo de la cola: esta foto ya es vieja y
@@ -1268,8 +1314,9 @@ async function cargarTodoInterno(cachedRecientes) {
       }
     }
   } catch (err) {
+    // ojo con el orden: esErrorDeRed() da true para todo lo que no sea ApiError, así que
+    // si se pregunta antes que por el timeout se come el caso y no se avisa nada.
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
-    else if (!esErrorDeRed(err)) toast(`Algo falló al actualizar: ${err.message}`, 8000);
     else if (esTimeout(err)) toast('Tu planilla tardó demasiado en responder. Probá otra vez; si sigue pasando, hay que actualizar el Apps Script.', 8000);
     else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Puede ser la señal; si sigue, revisá la dirección en ⚙️', 7000);
     return; // sin red no tiene sentido seguir; queda lo cacheado
