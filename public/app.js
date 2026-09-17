@@ -9,6 +9,10 @@ const LS_HIST_VER = 'mango_historial_version';   // versión del historial que t
 
 const TIMEOUT_MS = 20000;
 const TIMEOUT_LARGO = 60000;     // para bajar tandas del historial, que tardan más
+// El arranque lee la planilla entera si el backend es viejo, y Apps Script con
+// 3000 filas desde el otro lado del mundo puede pasarse de 20 segundos. Es una
+// sola llamada por apertura: mejor esperar que fallar.
+const TIMEOUT_ARRANQUE = 45000;
 const PAGINA_HISTORIAL = 600;    // filas por tanda al bajar el historial
 const PAGINA = 120;              // filas que se muestran de una en Movimientos antes de "Mostrar más"
 
@@ -267,6 +271,7 @@ const estaDevuelto = (m) => !!config[claveDevuelto(m.id)];
 // La planilla respondió, pero con un error (token mal, acción desconocida…). No es cuestión de señal.
 class ApiError extends Error {}
 function esErrorDeRed(err) { return !(err instanceof ApiError); }
+function esTimeout(err) { return err && err.name === 'AbortError'; }
 
 async function apiGet(params, timeoutMs = TIMEOUT_MS) {
   const q = new URLSearchParams(params);
@@ -1213,6 +1218,15 @@ async function descargarHistorial(totalEsperado) {
 
 async function cargarTodo() {
   const cachedRecientes = localStorage.getItem(LS_CACHE_RECIENTES);
+  // si no hay nada que mostrar, la espera se ve; avisamos en vez de dejar la pantalla muda
+  const avisoLento = (!cachedRecientes && localStorage.getItem(LS_CACHE_MIGRADOS) === null)
+    ? setTimeout(() => toast('Bajando tus movimientos… puede tardar', 40000), 2500)
+    : null;
+  try { return await cargarTodoInterno(cachedRecientes); }
+  finally { if (avisoLento) clearTimeout(avisoLento); }
+}
+
+async function cargarTodoInterno(cachedRecientes) {
   const hayMigradosCacheados = localStorage.getItem(LS_CACHE_MIGRADOS) !== null;
   ultimaSync = Date.now();
   const inicio = Date.now();
@@ -1220,13 +1234,13 @@ async function cargarTodo() {
   let recientesServidor = null;
 
   try {
-    let data = await apiGet({ action: 'bootstrap' });
+    let data = await apiGet({ action: 'bootstrap' }, TIMEOUT_ARRANQUE);
     if (!data || Array.isArray(data) || !('recientes' in data)) {
       // backend viejo (sin bootstrap): hacemos las tres llamadas de antes
       const [cats, cfg, rec] = await Promise.all([
-        apiGet({ action: 'categorias' }),
-        apiGet({ action: 'config' }),
-        apiGet({ action: 'movimientos', recientes: 1 })
+        apiGet({ action: 'categorias' }, TIMEOUT_ARRANQUE),
+        apiGet({ action: 'config' }, TIMEOUT_ARRANQUE),
+        apiGet({ action: 'movimientos', recientes: 1 }, TIMEOUT_ARRANQUE)
       ]);
       data = { categorias: cats, config: cfg, recientes: rec };
     }
@@ -1256,6 +1270,7 @@ async function cargarTodo() {
   } catch (err) {
     if (err instanceof ApiError) toast(`La planilla respondió: ${err.message}. Revisá la URL y la clave en ⚙️`, 6000);
     else if (!esErrorDeRed(err)) toast(`Algo falló al actualizar: ${err.message}`, 8000);
+    else if (esTimeout(err)) toast('Tu planilla tardó demasiado en responder. Probá otra vez; si sigue pasando, hay que actualizar el Apps Script.', 8000);
     else if (!cachedRecientes && !hayMigradosCacheados) toast('No pude conectar con tu planilla. Puede ser la señal; si sigue, revisá la dirección en ⚙️', 7000);
     return; // sin red no tiene sentido seguir; queda lo cacheado
   }
