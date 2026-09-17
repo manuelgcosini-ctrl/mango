@@ -1,4 +1,4 @@
-const VERSION = 'v15';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v16';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -1399,23 +1399,20 @@ async function cargarTodoInterno(cachedRecientes) {
   try {
     // Sonda de UNA fila: dice cuántas filas tiene la planilla y si el backend sabe leer
     // por rango, sin obligarlo a tocar el historial. Es la llamada más barata que hay.
-    // Van las tres juntas porque categorías y config no dependen del total.
-    const [sonda, cats, cfg] = await Promise.all([
-      apiGet({ action: 'movimientos', desde: 0, limite: 1 }, TIMEOUT_ARRANQUE),
-      apiGet({ action: 'categorias' }, TIMEOUT_ARRANQUE),
-      apiGet({ action: 'config' }, TIMEOUT_ARRANQUE)
-    ]);
+    //
+    // Va SOLA. Antes iba en un Promise.all junto con categorías y config, y eso tenía dos
+    // problemas: Apps Script atiende de a una por usuario, así que en paralelo no llegan
+    // antes; y sobre todo, si fallaba cualquiera de las tres no se cargaba NADA, ni los
+    // movimientos. Bastaba un tropiezo en la hoja Categorias para dejar la app vacía, con
+    // un "Failed to fetch" que parecía un problema de conexión y no lo era.
+    const sonda = await apiGet({ action: 'movimientos', desde: 0, limite: 1 }, TIMEOUT_ARRANQUE);
 
     if (sonda && !Array.isArray(sonda) && 'total' in sonda) {
       totalServidor = Number(sonda.total) || 0;
-      aplicarCategorias(cats);
-      aplicarConfig(cfg);
       recientesServidor = await bajarRecientes(totalServidor);
     } else if (Array.isArray(sonda)) {
       // backend antiguo: ignora el rango y devuelve la hoja entera. Ya la tenemos acá,
       // así que no hace falta pedirla otra vez.
-      aplicarCategorias(cats);
-      aplicarConfig(cfg);
       recientesServidor = sonda.filter(m => !esMigrado(m));
       totalServidor = sonda.length;
       migradosMem = sonda.filter(esMigrado);
@@ -1423,6 +1420,13 @@ async function cargarTodoInterno(cachedRecientes) {
     } else {
       throw new Error('la planilla respondió algo que no entiendo');
     }
+
+    // Categorías y config son accesorias: si alguna falla, quedan las que ya teníamos y
+    // los movimientos se muestran igual. Nunca más pueden dejar la app en blanco.
+    try { aplicarCategorias(await apiGet({ action: 'categorias' }, TIMEOUT_ARRANQUE)); }
+    catch (err) { ultimoError = `categorias: ${String(err && err.message || err).slice(0, 80)}`; }
+    try { aplicarConfig(await apiGet({ action: 'config' }, TIMEOUT_ARRANQUE)); }
+    catch (err) { ultimoError = `config: ${String(err && err.message || err).slice(0, 80)}`; }
 
     if (ultimaConfirmacion > inicio) {
       // mientras esperábamos, la planilla confirmó algo de la cola: esta foto ya es vieja y
