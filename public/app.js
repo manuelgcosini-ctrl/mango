@@ -1,3 +1,4 @@
+const VERSION = 'v10';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -2139,9 +2140,21 @@ $('guardarPatrimonioBtn').addEventListener('click', () => {
 });
 
 // ---------- Versión nueva (avisa el service worker) ----------
+// Se puede recargar sola sin pisarle nada a nadie si no hay nada a medio cargar.
+function seguroRecargar() {
+  if (editandoId || ligando) return false;
+  if (document.querySelector('.overlay.active')) return false;
+  if ($('monto').value.trim() || $('nota').value.trim()) return false;
+  return leerCola().length === 0;
+}
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
-    if (e.data && e.data.tipo === 'nueva-version') $('avisoVersion').classList.remove('oculto');
+    if (!e.data || e.data.tipo !== 'nueva-version') return;
+    // Antes esto solo mostraba un cartel. Si no lo tocabas (o no lo veías), te quedabas
+    // con la versión vieja para siempre y los arreglos no llegaban nunca al celu.
+    if (seguroRecargar()) { location.reload(); return; }
+    $('avisoVersion').classList.remove('oculto');
   });
   $('actualizarBtn').addEventListener('click', () => location.reload());
   navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -2174,6 +2187,8 @@ function init() {
     const mig = migradosLocales();
     if (mig.length) combinar(recientes, mig);
   }, 0);
+
+  $('versionApp').textContent = `Mango ${VERSION}`;
 
   if (!apiUrl()) {
     $('configOverlay').classList.add('active');
