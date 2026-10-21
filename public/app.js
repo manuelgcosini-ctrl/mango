@@ -1,4 +1,4 @@
-const VERSION = 'v16';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v17';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -75,6 +75,8 @@ let patrimonio = 0;
 let config = {};
 let editandoId = null;
 let ligando = null;          // { grupo, base } cuando se está ligando otro cargo a un gasto
+let categoriaOriginal = '';      // categoría del movimiento al abrir la edición
+let montoOriginalEdicion = null; // monto que tenía el movimiento al abrir la edición
 let ultimoGuardado = null;   // último gasto guardado, para ofrecer "ligar otro cargo"
 let movSucio = true;         // la lista de Movimientos necesita re-render
 let limiteRender = PAGINA;
@@ -87,7 +89,8 @@ let sincronizando = false;
 let errorSync = '';          // último error que devolvió la planilla al subir la cola
 let campoMonto = null;       // último campo de monto enfocado (para los botones + − × ÷)
 let forzarHistorial = false; // pedido explícito de volver a bajar todo el historial
-let ultimoError = '';        // para el diagnóstico de ⚙️: qué fue lo último que falló
+let ultimoError = '';
+const borradosEnEspera = new Map(); // id -> { mov, timer }: borrados con el "Deshacer" a la vista        // para el diagnóstico de ⚙️: qué fue lo último que falló
 const indiceBusqueda = new Map(); // id -> texto normalizado, para no re-normalizar 2800 filas por tecla
 
 let estado = {
@@ -167,7 +170,10 @@ function fmt(n, moneda) {
 
 // para las tarjetas del mes: el total de un mes no necesita centavos y asi entra
 function fmtStat(n) {
-  return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(Number(n) || 0);
+  const v = Number(n) || 0;
+  // un millón de pesos no entra en una tarjeta de 100 px: "1,2 M" se lee mejor que cortado
+  if (Math.abs(v) >= 1e6) return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 1 }).format(v / 1e6) + ' M';
+  return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(v);
 }
 
 function fmtCorto(n) {
@@ -342,24 +348,35 @@ function claveGrupo(m) { return m.grupo || m.id; }
 const RE_CAMBIO = /cambio de moneda|aud to eur|eur to aud|\d+\s*eur(os)?\b|\beuros\b/i;
 const RE_PRESTAMO = /^\s*pr[eé]stamo\b|^\s*presto\b|\bdeuda\b|le prest[eé]/i;
 
+// Plata que pasa a efectivo en una moneda que Mango no sigue (rupias en Bali, pesos,
+// baht, dongs…) se gasta allá: cuenta como gasto del mes. Antes contaba o no según cómo
+// estuviera escrita la nota. Pasar de AUD a EUR o USD entre tus cuentas sigue sin serlo.
+const RE_A_MONEDA_PROPIA = /\beur\b|\d\s*eur\b|euros?\b|aud to eur|eur to aud|\busd\b|d[oó]lar/i;
+const RE_A_EFECTIVO_AFUERA = /\b(?:idr|rupias?|ars|pesos?|vnd|dongs?|baht|thb|kip|soles|yen(?:es)?|filipinos?|php|bolivianos?)\b|\d\s*(?:idr|ars|vnd|thb)\b|retiro|extracci[oó]n|cajero|\batm\b|divisas/i;
+
 function claseMovimiento(m) {
   if (m.tipo === 'Ingreso') return 'ingreso';
   if (m.tipo === 'Transferencia') return 'interno';
   if (m.categoria === 'Inversiones') return 'inversion';
   const texto = `${m.subcategoria || ''} ${m.nota || ''}`;
-  if (m.categoria === 'Finanzas' && RE_CAMBIO.test(texto)) return 'cambio';
+  if (m.categoria === 'Finanzas') {
+    if (RE_A_MONEDA_PROPIA.test(m.nota || '')) return 'cambio';
+    if (RE_A_EFECTIVO_AFUERA.test(m.nota || '')) return 'consumo';
+    if (RE_CAMBIO.test(texto)) return 'cambio';
+  }
   if (m.subcategoria === 'Préstamos' || RE_PRESTAMO.test(texto)) return 'prestamo';
   return 'consumo';
 }
 const esConsumo = (m) => claseMovimiento(m) === 'consumo';
 function esPrestamo(m) { return claseMovimiento(m) === 'prestamo'; }
 
-// "Préstamo Ajeng" -> "Ajeng". Si no hay nombre, queda la nota entera.
+// "Préstamo Andrea" -> "Andrea". Si no hay nombre, queda la nota entera.
 function personaDe(m) {
   const n = String(m.nota || '').trim();
-  // ojo: la preposición tiene que ir separada por espacios, si no "Préstamo Ajeng"
-  // pierde la A inicial del nombre y queda "jeng"
-  const sinPrefijo = n.replace(/^\s*(?:pr[eé]stamo|presto|deuda|le prest[eé])(?:\s+(?:a|de|para))?\s+/i, '').trim();
+  // ojo: la preposición tiene que ir separada por espacios, si no "Préstamo Andrea"
+  // pierde la A inicial del nombre y queda "ndrea"
+  const sinPrefijo = n.replace(/^\s*(?:pr[eé]stamo|presto|deuda|le prest[eé])\s*:?(?:\s+(?:a|de|para))?\s+/i, '')
+    .split(' · ')[0].trim(); // lo que va después de " · " es la nota, no el nombre
   return sinPrefijo || n || 'Sin nombre';
 }
 function iniciales(nombre) {
@@ -367,6 +384,8 @@ function iniciales(nombre) {
   return ((p[0] || '?')[0] + (p[1] ? p[1][0] : '')).toUpperCase();
 }
 // los préstamos saldados se marcan en Config, así no hace falta tocar la planilla
+// las notas que arma notaFinal: "Préstamo X" o "Préstamo X · algo"
+const RE_NOTA_PRESTAMO = /^\s*(?:pr[eé]stamo|presto|le prest[eé])\b/i;
 const claveDevuelto = (id) => `devuelto_${id}`;
 const estaDevuelto = (m) => !!config[claveDevuelto(m.id)];
 
@@ -414,11 +433,15 @@ async function apiPost(body) {
 // Cada número de la expresión se normaliza por separado. El decimal es el separador que
 // aparece ÚLTIMO ("1.234,56" es formato argentino, "1,234.56" es el del banco australiano).
 function normalizarToken(t) {
+  if (/[.,]$/.test(t)) return t;  // "0,5." queda inválido en vez de leerse como 5
   const uc = t.lastIndexOf(',');
   const up = t.lastIndexOf('.');
   if (uc !== -1 && up !== -1) return uc > up ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, '');
-  if (uc !== -1) return t.split(',').length > 2 ? t.replace(/,/g, '') : t.replace(',', '.');
-  if (up !== -1) return /^\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '') : t; // "1.500" = mil quinientos
+  // un solo separador con exactamente tres cifras detrás es de miles ("1.500", "1,000"
+  // como escribe el banco australiano), salvo que adelante haya un 0 ("0.125")
+  const miles = /^[1-9]\d{0,2}([.,]\d{3})+$/;
+  if (uc !== -1) return (t.split(',').length > 2 || miles.test(t)) ? t.replace(/,/g, '') : t.replace(',', '.');
+  if (up !== -1) return miles.test(t) ? t.replace(/\./g, '') : t;
   return t;
 }
 
@@ -468,7 +491,12 @@ function actualizarCalcHint() {
   hint.classList.toggle('error', !isFinite(n));
 }
 
-$('monto').addEventListener('input', () => { actualizarCalcHint(); actualizarTasaHint(); });
+function ajustarFuenteMonto() {
+  const n = $('monto').value.length;
+  $('monto').classList.toggle('largo', n > 8 && n <= 11);
+  $('monto').classList.toggle('muy-largo', n > 11);
+}
+$('monto').addEventListener('input', () => { actualizarCalcHint(); actualizarTasaHint(); ajustarFuenteMonto(); });
 $('montoRecibido').addEventListener('input', actualizarTasaHint);
 
 ['monto', 'montoRecibido'].forEach(id => {
@@ -476,9 +504,18 @@ $('montoRecibido').addEventListener('input', actualizarTasaHint);
 });
 
 // Enter (o la tecla "Listo" del teclado del celu) guarda
-['monto', 'montoRecibido', 'nota'].forEach(id => {
+['monto', 'montoRecibido', 'nota', 'persona'].forEach(id => {
   $(id).addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); $('guardarBtn').click(); }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (id === 'monto') {
+      // el teclado dice "Siguiente": lleva al campo que sigue o cierra el teclado para elegir
+      if (estado.tipo === 'Transferencia') { $('montoRecibido').focus(); return; }
+      if (!$('bloqueDetalle').classList.contains('oculto')) { $('nota').focus(); return; }
+      $(id).blur();
+      return;
+    }
+    $('guardarBtn').click();
   });
 });
 
@@ -570,12 +607,13 @@ function vistaActiva() { return document.querySelector('.view.active').id.replac
 
 // ---------- Tipo ----------
 function aplicarTipo(tipo) {
+  // cambiar de tipo cambia las categorías posibles: lo elegido antes ya no aplica
+  if (tipo !== estado.tipo) olvidarCategoria();
   estado.tipo = tipo;
   document.querySelectorAll('.tipo-btn').forEach(b => b.classList.toggle('active', b.dataset.tipo === tipo));
   $('bloqueTransferencia').classList.toggle('oculto', tipo !== 'Transferencia');
-  $('bloqueCategoria').classList.toggle('oculto', tipo === 'Transferencia');
-  $('labelCuenta').textContent = tipo === 'Transferencia' ? 'Cuenta de origen' : 'Cuenta';
-  actualizarBloquePrestamo();
+  renderCategoria();
+  renderUltimos(); // el botón de ligar solo tiene sentido cargando un gasto
 }
 
 // al elegir Finanzas > Préstamos aparece "¿a quién?", para no depender de cómo
@@ -583,13 +621,15 @@ function aplicarTipo(tipo) {
 function actualizarBloquePrestamo() {
   const es = estado.tipo === 'Gasto' && estado.subcategoria === 'Préstamos';
   $('bloquePrestamo').classList.toggle('oculto', !es);
+  // en un préstamo las notas sugeridas sobran (están los chips de personas) y así entra en pantalla
+  $('bloqueDetalle').classList.toggle('modo-prestamo', es);
   if (es) renderPersonasSugeridas();
 }
 
 function renderPersonasSugeridas() {
   const vistas = new Map();
   for (const m of movimientos) {
-    if (!esPrestamo(m) || m.tipo !== 'Gasto') continue;
+    if (!esPrestamo(m) || m.tipo !== 'Gasto' || !RE_NOTA_PRESTAMO.test(String(m.nota || ''))) continue;
     const p = personaDe(m);
     const k = sinAcentos(p);
     if (k && !vistas.has(k)) vistas.set(k, p);
@@ -617,22 +657,40 @@ $('tipoToggle').addEventListener('click', (e) => {
 });
 
 // ---------- Fecha ----------
-// La fecha elegida se escribe completa debajo de los chips: si la app quedó
-// abierta desde ayer y "Hoy" envejeció, se ve enseguida.
+// La fecha elegida se escribe al lado de los chips: si la app quedó abierta desde
+// ayer y "Hoy" envejeció, se ve enseguida.
 function actualizarContexto() {
+  $('fecha').max = fechaLocalStr(new Date()); // sin fechas futuras por error
   const v = $('fecha').value;
-  $('fechaHint').textContent = fechaValida(v) ? fechaLarga(v) : 'Elegí una fecha con "Otra 📅"';
-  $('contextoTexto').textContent = `${estado.moneda} ${estado.medio}`;
+  $('fechaHint').textContent = fechaValida(v)
+    ? (() => { const [y, m, d] = v.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\./g, ''); })()
+    : 'Elegí la fecha 📅';
 }
 const actualizarFechaHint = actualizarContexto;
 
-$('contextoBtn').addEventListener('click', () => {
-  const abierto = $('contextoPanel').classList.toggle('oculto');
-  $('contextoBtn').setAttribute('aria-expanded', String(!abierto));
-});
+// Marca el chip que corresponde a una fecha: si la que eligieron en el calendario
+// es hoy, ayer o anteayer, se prende ese chip; si no, el 📅.
+function marcarChipFecha(v) {
+  let dias = null;
+  for (let i = 0; i < 3; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    if (fechaLocalStr(d) === v) { dias = i; break; }
+  }
+  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.toggle('active',
+    dias === null ? c.id === 'chipOtraFecha' : c.dataset.dias === String(dias)));
+}
+
+function fijarFechaRelativa(dias) {
+  const d = new Date();
+  d.setDate(d.getDate() - dias);
+  $('fecha').value = fechaLocalStr(d);
+  marcarChipFecha($('fecha').value);
+  actualizarFechaHint();
+}
 
 // "Hoy" se recalcula al volver a la app: una PWA puede quedar abierta desde ayer
-// y si no, el chip dice Hoy pero la fecha de abajo es la de ayer.
+// y si no, el chip dice Hoy pero la fecha guardada es la de ayer.
 function refrescarFechaChip() {
   const activo = document.querySelector('#fechaChips .chip.active');
   if (activo && activo.dataset.dias !== undefined) {
@@ -644,58 +702,86 @@ function refrescarFechaChip() {
 }
 
 $('fechaChips').addEventListener('click', (e) => {
-  const chip = e.target.closest('.chip');
-  if (!chip) return;
-  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
-  chip.classList.add('active');
-  const fechaInput = $('fecha');
-  if (chip.id === 'chipOtraFecha') {
-    fechaInput.classList.remove('oculto');
-    try {
-      if (typeof fechaInput.showPicker === 'function') fechaInput.showPicker();
-      else fechaInput.focus();
-    } catch (err) {
-      fechaInput.focus();
-    }
-  } else {
-    fechaInput.classList.add('oculto');
-    refrescarFechaChip();
-  }
+  const chip = e.target.closest('.chip[data-dias]');
+  if (!chip) return; // el 📅 lo maneja su propio input
+  fijarFechaRelativa(Number(chip.dataset.dias));
 });
-$('fecha').addEventListener('change', actualizarFechaHint);
-$('fecha').addEventListener('input', actualizarFechaHint);
+
+// Antes el chip "Otra" mostraba un campo oculto y en el mismo instante le pedía al
+// navegador que abriera el calendario. Si el celu no lo abría (pasa cuando el campo
+// recién aparece), quedaba solo enfocado y había que tocar dos veces. Ahora el input
+// está encima del chip, transparente: el toque cae en el control nativo y Android abre
+// el calendario solo. En la compu, donde un clic en el campo no lo abre, se pide a mano.
+let ultimoPuntero = 'mouse';
+document.addEventListener('pointerdown', (e) => { ultimoPuntero = e.pointerType || 'mouse'; }, true);
+$('fecha').addEventListener('click', () => {
+  if (ultimoPuntero === 'touch') return;
+  try { if (typeof $('fecha').showPicker === 'function') $('fecha').showPicker(); } catch (err) { /* ya abierto o no soportado */ }
+});
+function fechaElegida() {
+  const v = $('fecha').value;
+  if (fechaValida(v)) marcarChipFecha(v);
+  // "Borrar" en el selector de Android la deja vacía: que ningún chip diga Ayer
+  else document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.toggle('active', c.id === 'chipOtraFecha'));
+  actualizarFechaHint();
+}
+$('fecha').addEventListener('change', fechaElegida);
+$('fecha').addEventListener('input', fechaElegida);
 
 // ---------- Cuenta (moneda + medio) ----------
-function renderMedioChips(contId, moneda, medioActivo, onSelect) {
-  const cont = $(contId);
+// El medio (Banco / Efectivo…) es un botón al lado de la moneda que alterna con cada
+// toque. Antes vivía en una línea plegable aparte que ocupaba lugar y casi no se usaba.
+function opcionesMedio(moneda, actual) {
   const opciones = [...(MEDIOS_POR_MONEDA[moneda] || [])];
   // un medio que ya no está en la lista (fila vieja) se muestra igual, para no reasignarlo sin querer
-  if (medioActivo && !opciones.some(o => o.v === medioActivo)) opciones.push({ v: medioActivo, ico: '🏷️' });
-  const activo = opciones.some(o => o.v === medioActivo) ? medioActivo : opciones[0].v;
-  cont.innerHTML = opciones.map(o =>
-    `<button type="button" class="chip${o.v === activo ? ' active' : ''}" data-medio="${esc(o.v)}">${o.ico} ${esc(o.v)}</button>`
-  ).join('');
-  onSelect(activo);
-  cont.querySelectorAll('.chip').forEach(c => {
-    c.addEventListener('click', () => {
-      cont.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
-      c.classList.add('active');
-      onSelect(c.dataset.medio);
-    });
-  });
+  if (actual && !opciones.some(o => o.v === actual)) opciones.push({ v: actual, ico: '🏷️' });
+  return opciones;
 }
 
-const fijarMedio = (m) => { estado.medio = m; actualizarContexto(); };
+function pintarMedio(btn, opcion) {
+  btn.textContent = `${opcion.ico} ${opcion.v}`;
+  btn.dataset.medio = opcion.v;
+}
+
+function renderMedio(btnId, moneda, medioActivo, onSelect) {
+  const btn = $(btnId);
+  const opciones = opcionesMedio(moneda, medioActivo);
+  const activo = opciones.find(o => o.v === medioActivo) || opciones[0];
+  btn.dataset.moneda = moneda;
+  pintarMedio(btn, activo);
+  onSelect(activo.v);
+}
+
+function ciclarMedio(btnId, onSelect) {
+  const btn = $(btnId);
+  const opciones = opcionesMedio(btn.dataset.moneda, btn.dataset.medio);
+  const i = opciones.findIndex(o => o.v === btn.dataset.medio);
+  const sig = opciones[(i + 1) % opciones.length];
+  pintarMedio(btn, sig);
+  onSelect(sig.v);
+}
+
+const LS_CUENTA = 'mango_ultima_cuenta';
+const fijarMedio = (m) => {
+  estado.medio = m;
+  if (editandoId) return; // editar un movimiento viejo no cambia la cuenta de todos los días
+  try { localStorage.setItem(LS_CUENTA, JSON.stringify({ moneda: estado.moneda, medio: m })); } catch (err) { /* no importa */ }
+};
+const fijarMedioDestino = (m) => { estado.medioDestino = m; };
+$('medioBtn').addEventListener('click', () => ciclarMedio('medioBtn', fijarMedio));
+$('medioDestinoBtn').addEventListener('click', () => ciclarMedio('medioDestinoBtn', fijarMedioDestino));
 
 $('moneda').addEventListener('change', (e) => {
   estado.moneda = e.target.value;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
+  // "Banco" no existe en USD ni en ARS: antes quedaba "🏷️ Banco" y nacía una cuenta "USD Banco"
+  const valido = (MEDIOS_POR_MONEDA[estado.moneda] || []).some(o => o.v === estado.medio);
+  renderMedio('medioBtn', estado.moneda, valido ? estado.medio : null, fijarMedio);
   actualizarTasaHint();
-  actualizarContexto();
 });
 $('monedaDestino').addEventListener('change', (e) => {
   estado.monedaDestino = e.target.value;
-  renderMedioChips('medioChipsDestino', estado.monedaDestino, estado.medioDestino, (m) => { estado.medioDestino = m; });
+  const valido = (MEDIOS_POR_MONEDA[estado.monedaDestino] || []).some(o => o.v === estado.medioDestino);
+  renderMedio('medioDestinoBtn', estado.monedaDestino, valido ? estado.medioDestino : null, fijarMedioDestino);
   actualizarTasaHint();
 });
 
@@ -708,16 +794,20 @@ function subcategoriaSugerida(cat) {
   return SUB_SUGERIDA[cat] || null;
 }
 
-function htmlCatChip(cat, ico) {
-  return `<button type="button" class="cat-chip" data-cat="${esc(cat)}"><span class="ico">${ico || '🏷️'}</span>${esc(cat)}</button>`;
+// Elegís una categoría y la grilla se comprime en un chip; tocás el chip y se vuelve a
+// abrir. Lo mismo con la subcategoría. Así Cargar entra entero en una pantalla y cada
+// cosa aparece recién cuando hace falta.
+let grillaAbierta = true;   // grilla de categorías desplegada
+let subsAbiertas = false;  // subcategorías desplegadas aunque ya haya una elegida
+
+function olvidarCategoria() {
+  estado.categoria = null;
+  estado.subcategoria = null;
+  grillaAbierta = true;
+  subsAbiertas = false;
 }
 
-const CATS_VISIBLES = 6;
-let catsExpandidas = false;
-
-// Once categorias a dos por fila son seis filas, y empujan la subcategoria y la
-// nota fuera de pantalla. Se muestran las que mas usas y el resto queda detras
-// de un "+ mas": casi siempre la que buscas ya esta en las primeras.
+// Las categorías se ordenan por lo que más usaste en los últimos tres meses.
 function ordenarPorUso(unicas) {
   const desde = sumarMeses(fechaLocalStr(new Date()).slice(0, 7), -3);
   const uso = {};
@@ -728,97 +818,124 @@ function ordenarPorUso(unicas) {
   return unicas.slice().sort((a, b) => (uso[b.categoria] || 0) - (uso[a.categoria] || 0));
 }
 
-function renderCategoriaChips() {
-  const cont = $('categoriaChips');
-  const delTipo = fuenteCategorias().filter(c => c.tipo === estado.tipo);
+// El orden se calcula una vez por apertura y por tipo, cuando ya están los datos. Si se
+// recalcula en cada pintada, guardar dos gastos en "Otros" la subía de puesto y corría las
+// demás: el dedo iba a donde estaba Compras y tocaba otra cosa.
+const ordenCongelado = {};
+function catsDelTipo() {
   const unicas = [];
   const vistas = new Set();
-  delTipo.forEach(c => { if (!vistas.has(c.categoria)) { vistas.add(c.categoria); unicas.push(c); } });
-
-  const orden = ordenarPorUso(unicas);
-  const hayDeMas = orden.length > CATS_VISIBLES + 1;
-  const mostradas = (catsExpandidas || !hayDeMas) ? orden : orden.slice(0, CATS_VISIBLES);
-
-  cont.innerHTML = mostradas.map(c => htmlCatChip(c.categoria, c.categoriaIcono)).join('')
-    + (hayDeMas ? `<button type="button" class="cat-chip mas-cats" id="masCats">${catsExpandidas ? '− menos' : `+ ${orden.length - CATS_VISIBLES} más`}</button>` : '');
-
-  if (orden.length) {
-    const activa = mostradas.find(c => c.categoria === estado.categoria) || orden[0];
-    cont.querySelectorAll('.cat-chip').forEach(b => b.classList.toggle('active', b.dataset.cat === activa.categoria));
-    estado.categoria = activa.categoria;
-  } else {
-    estado.categoria = null;
+  fuenteCategorias().filter(c => c.tipo === estado.tipo).forEach(c => {
+    if (!vistas.has(c.categoria)) { vistas.add(c.categoria); unicas.push(c); }
+  });
+  const dia = fechaLocalStr(new Date());
+  let orden = ordenCongelado[estado.tipo];
+  if (!orden || orden.dia !== dia || (!orden.conDatos && movimientos.length > 500)) {
+    orden = ordenCongelado[estado.tipo] = { dia, conDatos: movimientos.length > 500, nombres: ordenarPorUso(unicas).map(c => c.categoria) };
   }
-  renderSubcategoriaChips();
-  renderNotasSugeridas();
+  const pos = (c) => { const i = orden.nombres.indexOf(c.categoria); return i === -1 ? 999 : i; };
+  return unicas.sort((a, b) => pos(a) - pos(b));
 }
 
-function activarCategoria(cat) {
-  document.querySelectorAll('.cat-chip').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
-  estado.categoria = cat;
-  renderSubcategoriaChips();
-  renderNotasSugeridas();
+function subsDe(cat) {
+  return fuenteCategorias().filter(c => c.tipo === estado.tipo && c.categoria === cat && c.subcategoria);
 }
 
-// un solo listener por grupo de chips (delegación), así los chips agregados al editar también responden
+function iconoCategoria(cat) {
+  const c = fuenteCategorias().find(x => x.tipo === estado.tipo && x.categoria === cat);
+  return (c && c.categoriaIcono) || '🏷️';
+}
+
+function renderCategoria() {
+  if (estado.tipo === 'Transferencia') {
+    $('bloqueCategoria').classList.add('oculto');
+    mostrarDetalle(true);
+    return;
+  }
+  $('bloqueCategoria').classList.remove('oculto');
+
+  const cats = catsDelTipo();
+  // al editar, una categoría que ya no existe en la taxonomía se muestra igual
+  if (estado.categoria && !cats.some(c => c.categoria === estado.categoria)) {
+    cats.push({ categoria: estado.categoria, categoriaIcono: '🏷️' });
+  }
+
+  const grilla = !estado.categoria || grillaAbierta;
+  $('categoriaChips').classList.toggle('oculto', !grilla);
+  $('catElegida').classList.toggle('oculto', grilla);
+  if (grilla) {
+    $('categoriaChips').innerHTML = cats.map(c =>
+      `<button type="button" class="cat-tile${c.categoria === estado.categoria ? ' active' : ''}" data-cat="${esc(c.categoria)}">` +
+      `<span class="ico">${c.categoriaIcono || '🏷️'}</span><span class="nom">${esc(c.categoria)}</span></button>`).join('');
+    $('subcategoriaChips').classList.add('oculto');
+    mostrarDetalle(false);
+    return;
+  }
+
+  const subs = subsDe(estado.categoria).map(c => ({ sub: c.subcategoria, ico: c.subcategoriaIcono }));
+  if (estado.subcategoria && !subs.some(x => x.sub === estado.subcategoria)) subs.push({ sub: estado.subcategoria, ico: '🏷️' });
+  const elegida = subs.find(x => x.sub === estado.subcategoria);
+  const verSubs = subs.length > 0 && (!elegida || subsAbiertas);
+
+  $('catElegida').innerHTML =
+    `<button type="button" class="chip active chip-elegida" data-reabrir="cat" aria-label="Cambiar categoría">${iconoCategoria(estado.categoria)} ${esc(estado.categoria)} <span class="flecha">▾</span></button>` +
+    (elegida && !verSubs ? `<button type="button" class="chip active chip-elegida" data-reabrir="sub" aria-label="Cambiar subcategoría">${elegida.ico || ''} ${esc(elegida.sub)} <span class="flecha">▾</span></button>` : '');
+
+  $('subcategoriaChips').classList.toggle('oculto', !verSubs);
+  if (verSubs) {
+    $('subcategoriaChips').innerHTML = subs.map(x =>
+      `<button type="button" class="chip${x.sub === estado.subcategoria ? ' marcada' : ''}" data-sub="${esc(x.sub)}">${x.ico || ''} ${esc(x.sub)}</button>`).join('');
+  }
+  // al editar una fila vieja sin subcategoría, la nota se sigue viendo mientras elegís
+  mostrarDetalle(!verSubs || !!editandoId);
+}
+const renderCategoriaChips = renderCategoria;
+
+function mostrarDetalle(si) {
+  $('bloqueDetalle').classList.toggle('oculto', !si);
+  actualizarBloquePrestamo();
+  if (si) renderNotasSugeridas();
+}
+
+function elegirCategoria(cat) {
+  if (cat !== estado.categoria) {
+    estado.categoria = cat;
+    estado.subcategoria = subsDe(cat).length ? null : '';
+    document.querySelectorAll('#notasChips .chip').forEach(c => c.classList.remove('active'));
+  }
+  grillaAbierta = false;
+  subsAbiertas = false;
+  renderCategoria();
+}
+
+// un solo listener por grupo (delegación), así los chips que se repintan siguen respondiendo
 $('categoriaChips').addEventListener('click', (e) => {
-  const btn = e.target.closest('.cat-chip');
+  const btn = e.target.closest('.cat-tile');
+  if (btn) elegirCategoria(btn.dataset.cat);
+});
+$('catElegida').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-reabrir]');
   if (!btn) return;
-  if (btn.id === 'masCats') { catsExpandidas = !catsExpandidas; renderCategoriaChips(); return; }
-  activarCategoria(btn.dataset.cat);
+  if (btn.dataset.reabrir === 'cat') grillaAbierta = true; else subsAbiertas = true;
+  renderCategoria();
 });
 $('subcategoriaChips').addEventListener('click', (e) => {
   const btn = e.target.closest('.chip');
   if (!btn) return;
-  document.querySelectorAll('#subcategoriaChips .chip').forEach(b => b.classList.toggle('active', b === btn));
   estado.subcategoria = btn.dataset.sub;
-  actualizarBloquePrestamo();
+  subsAbiertas = false;
+  renderCategoria();
 });
 
-// Al editar: deja el movimiento exactamente como estaba. Si su categoría, subcategoría o
-// medio ya no existen en la taxonomía, se muestran como chip extra; y si no tenía
-// subcategoría, no se le inventa una.
+// Al editar: deja el movimiento exactamente como estaba. Si su categoría o subcategoría
+// ya no existen en la taxonomía se muestran igual, y si no tenía subcategoría no se le
+// inventa una.
 function seleccionarCategoria(cat, sub) {
-  const cont = $('categoriaChips');
-  if (![...cont.querySelectorAll('.cat-chip')].some(b => b.dataset.cat === cat)) {
-    catsExpandidas = true;
-    renderCategoriaChips();
-  }
-  if (![...cont.querySelectorAll('.cat-chip')].some(b => b.dataset.cat === cat)) {
-    cont.insertAdjacentHTML('beforeend', htmlCatChip(cat, '🏷️'));
-  }
-  activarCategoria(cat);
-
-  const subCont = $('subcategoriaChips');
-  if (sub) {
-    if (![...subCont.querySelectorAll('.chip')].some(b => b.dataset.sub === sub)) {
-      subCont.insertAdjacentHTML('beforeend', `<button type="button" class="chip" data-sub="${esc(sub)}">🏷️ ${esc(sub)}</button>`);
-    }
-    subCont.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b.dataset.sub === sub));
-    estado.subcategoria = sub;
-  } else {
-    subCont.querySelectorAll('.chip').forEach(b => b.classList.remove('active'));
-    estado.subcategoria = '';
-  }
-}
-
-function renderSubcategoriaChips() {
-  const cont = $('subcategoriaChips');
-  const subs = fuenteCategorias().filter(c => c.tipo === estado.tipo && c.categoria === estado.categoria && c.subcategoria);
-
-  if (!subs.length) {
-    cont.innerHTML = '';
-    estado.subcategoria = null;
-    return;
-  }
-
-  const sugerida = subcategoriaSugerida(estado.categoria);
-  const activa = subs.some(s => s.subcategoria === sugerida) ? sugerida : subs[0].subcategoria;
-  cont.innerHTML = subs.map(s =>
-    `<button type="button" class="chip${s.subcategoria === activa ? ' active' : ''}" data-sub="${esc(s.subcategoria)}">${s.subcategoriaIcono || ''} ${esc(s.subcategoria)}</button>`
-  ).join('');
-  estado.subcategoria = activa;
-  actualizarBloquePrestamo();
+  estado.categoria = cat || null;
+  estado.subcategoria = sub || '';
+  grillaAbierta = !cat;
+  subsAbiertas = false;
+  renderCategoria();
 }
 
 // Las notas que más repetís en esta categoría, como chips de un toque: escribir
@@ -830,8 +947,13 @@ function renderNotasSugeridas() {
     return;
   }
   const frec = new Map();   // clave sin acentos -> { texto, veces, ultima }
+  // con subcategoría elegida, las notas de esa subcategoría (las de Taxi/App no sirven
+  // en Vuelos); si todavía no hay ninguna repetida ahí, las de toda la categoría
+  const sub = estado.subcategoria;
+  const repetidasEnSub = sub && movimientos.filter(m => m.categoria === estado.categoria && m.subcategoria === sub && m.nota).length > 2;
   for (const m of movimientos) {
     if (m.categoria !== estado.categoria || !m.nota) continue;
+    if (repetidasEnSub && m.subcategoria !== sub) continue;
     const n = String(m.nota).trim();
     const k = sinAcentos(n);
     if (!k) continue;
@@ -889,14 +1011,36 @@ function leerFormulario() {
   };
 }
 
+let guardadoRecien = 0;
 $('guardarBtn').addEventListener('click', () => {
+  // el segundo toque de un doble toque llegaba con el formulario ya vacío y decía
+  // "Poné un monto válido", que parece que falló
+  if (Date.now() - guardadoRecien < 800 && !$('monto').value.trim()) return;
   const mov = leerFormulario();
   if (!isFinite(mov.monto) || mov.monto <= 0) { toast('Poné un monto válido'); return; }
-  if (!mov.fecha) { toast('La fecha no es válida: elegila con "Otra 📅"'); return; }
+  if (!mov.fecha) { toast('Falta la fecha: elegila con 📅'); return; }
   if (!apiUrl()) { toast('Primero configurá la conexión con tu planilla (⚙️)'); return; }
+  // Antes la app preseleccionaba sola una categoría y una subcategoría, así que nunca
+  // quedaban vacías. Ahora se eligen a mano: si falta alguna, se abre para elegirla.
+  if (mov.tipo !== 'Transferencia') {
+    // al editar, una fila vieja sin subcategoría se puede guardar tal cual; pero si le
+    // cambiaste la categoría (o el tipo), hay que completarla como una nueva
+    const exigir = !editandoId || mov.categoria !== categoriaOriginal;
+    if (!mov.categoria) { toast('Elegí una categoría'); grillaAbierta = true; renderCategoria(); return; }
+    if (exigir && subsDe(mov.categoria).length && !mov.subcategoria) { toast('Elegí una subcategoría'); subsAbiertas = true; renderCategoria(); return; }
+    if (!editandoId && mov.tipo === 'Gasto' && mov.subcategoria === 'Préstamos' && !$('persona').value.trim()) {
+      toast('¿A quién le prestás?'); $('persona').focus(); return;
+    }
+  }
   if (mov.tipo === 'Transferencia') {
     if (mov.moneda === mov.monedaDestino && mov.medioPago === mov.medioPagoDestino) { toast('La cuenta de origen y destino no pueden ser la misma'); return; }
-    if (!isFinite(mov.montoRecibido) || mov.montoRecibido <= 0) mov.montoRecibido = mov.moneda === mov.monedaDestino ? mov.monto : mov.montoRecibido;
+    // misma moneda: si el recibido está vacío o es el que venía de antes de editar el
+    // monto, sigue al monto. Antes, editar un pase de 100 a 150 dejaba el recibido en 100
+    // y desaparecían 50 entre una cuenta y la otra.
+    if (mov.moneda === mov.monedaDestino &&
+        (!isFinite(mov.montoRecibido) || mov.montoRecibido <= 0 || (editandoId && mov.montoRecibido === montoOriginalEdicion))) {
+      mov.montoRecibido = mov.monto;
+    }
     if (!isFinite(mov.montoRecibido) || mov.montoRecibido <= 0) { toast('Poné el monto recibido en la cuenta destino'); return; }
   }
 
@@ -905,19 +1049,30 @@ $('guardarBtn').addEventListener('click', () => {
       guardarEdicion(editandoId, mov);
       return;
     }
-    if (ligando && mov.tipo === 'Gasto') mov.grupo = ligando.grupo;
+    if (ligando && mov.tipo === 'Gasto') {
+      // el grupo se muestra como un solo total: si un cargo va en otra moneda, la suma miente
+      if (mov.moneda !== ligando.base.moneda) { toast(`Los cargos ligados van en ${ligando.base.moneda}, como el gasto base`); return; }
+      mov.grupo = ligando.grupo;
+      mov.fecha = ligando.base.fecha; // el grupo es un solo gasto: un solo día
+    }
     const guardado = enviarMovimiento({ ...mov, id: nuevoId() });
+    guardadoRecien = Date.now();
     $('monto').value = '';
     $('montoRecibido').value = '';
     $('nota').value = '';
+    $('persona').value = '';
     $('calcHint').textContent = '';
     $('tasaHint').textContent = '';
-    if (guardado.tipo === 'Gasto') {
-      ultimoGuardado = guardado;
-      mostrarLigarRow(guardado);
-    } else {
-      ocultarLigarRow();
-    }
+    // la fecha y la cuenta quedan como estaban: cargar varios gastos del mismo día
+    // atrasado no obliga a elegir "Ayer" cada vez. La categoría vuelve a abrirse,
+    // salvo que estés ligando cargos, que comparten la del gasto base.
+    // Ligar es de a un cargo: después de guardarlo se corta solo (antes quedaba prendido y
+    // cualquier gasto de otro día terminaba pegado al grupo). Para sumar otro, "Otro más".
+    if (ligando) { ligando = null; $('bannerLigar').classList.add('oculto'); }
+    olvidarCategoria();
+    renderCategoria();
+    ultimoGuardado = guardado;
+    renderUltimos();
     $('monto').focus();
   } catch (err) {
     vibrar([40, 60, 40]);
@@ -926,33 +1081,33 @@ $('guardarBtn').addEventListener('click', () => {
 });
 
 // ---------- Ligar cargos (un gasto que sale como varios cargos en la tarjeta) ----------
-function mostrarLigarRow(mov) {
-  const row = $('ligarRow');
-  row.classList.remove('oculto');
-  $('ligarBtn').textContent = ligando
-    ? `🔗 Ligar un cargo más (${nombreMov(mov)}, ${fmt(mov.monto, mov.moneda)})`
-    : `🔗 Ligar otro cargo a este gasto (${nombreMov(mov)}, ${fmt(mov.monto, mov.moneda)})`;
-}
-function ocultarLigarRow() { $('ligarRow').classList.add('oculto'); }
+// El botón vive en la línea de "Último" que está arriba de Guardar.
+function mostrarLigarRow() { renderUltimos(); }
+function ocultarLigarRow() { renderUltimos(); }
 function nombreMov(m) { return `${m.categoria || m.tipo}${m.subcategoria ? ' · ' + m.subcategoria : ''}`; }
 
-$('ligarBtn').addEventListener('click', () => {
+function iniciarLigar() {
   if (!ultimoGuardado) return;
+  if (editandoId) cancelarEdicion(); // si no, el "Guardar cambios" pisaba el movimiento editado
   ligando = { grupo: claveGrupo(ultimoGuardado), base: ultimoGuardado };
-  // dejamos tipo/fecha/cuenta/categoría como estaban (son los del gasto base) y pedimos solo el monto
+  estado.moneda = ultimoGuardado.moneda;
+  $('moneda').value = ultimoGuardado.moneda;
+  renderMedio('medioBtn', estado.moneda, ultimoGuardado.medioPago, fijarMedio);
+  // tipo, fecha, cuenta y categoría son los del gasto base: se pide solo el monto
   aplicarTipo('Gasto');
+  seleccionarCategoria(ultimoGuardado.categoria, ultimoGuardado.subcategoria);
   $('bannerLigar').classList.remove('oculto');
-  $('bannerLigarTexto').textContent = `🔗 Ligando a: ${nombreMov(ultimoGuardado)} (${fmt(ultimoGuardado.monto, ultimoGuardado.moneda)})`;
+  $('bannerLigarTexto').textContent = `🔗 Ligando a: ${nombreMov(ultimoGuardado)} · ${cuandoFue(ultimoGuardado.fecha)} (${fmt(ultimoGuardado.monto, ultimoGuardado.moneda)})`;
   $('nota').value = '';
+  renderUltimos();
   $('monto').focus();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-});
+}
 $('cancelarLigarBtn').addEventListener('click', cancelarLigar);
 
 function cancelarLigar() {
   ligando = null;
   $('bannerLigar').classList.add('oculto');
-  ocultarLigarRow();
+  renderUltimos();
 }
 
 // ---------- Edición ----------
@@ -984,61 +1139,87 @@ function resetFormularioCargar() {
   document.querySelectorAll('#notasChips .chip, #personaChips .chip').forEach(c => c.classList.remove('active'));
   $('calcHint').textContent = '';
   $('tasaHint').textContent = '';
-  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
-  $('fecha').classList.add('oculto');
-  document.querySelector('#fechaChips .chip[data-dias="0"]').classList.add('active');
-  $('fecha').value = fechaLocalStr(new Date());
-  $('contextoPanel').classList.add('oculto');
-  $('contextoBtn').setAttribute('aria-expanded', 'false');
-  actualizarContexto();
+  // si se venía de una edición, la fecha vuelve a la que tenías (cargando gastos de ayer,
+  // revisar el último y cancelar no te pasa el siguiente a hoy)
+  const previa = fechaAntesDeEditar;
+  fechaAntesDeEditar = null;
+  if (previa && previa.dias !== null) fijarFechaRelativa(previa.dias);
+  else if (previa && fechaValida(previa.valor)) { $('fecha').value = previa.valor; marcarChipFecha(previa.valor); actualizarFechaHint(); }
+  else fijarFechaRelativa(0);
+  olvidarCategoria();
   aplicarTipo('Gasto');
-  renderCategoriaChips();
+  renderCategoria();
   $('bannerEdicion').classList.add('oculto');
   $('guardarBtn').textContent = 'Guardar';
 }
 
 function cancelarEdicion() {
   editandoId = null;
+  volverACuentaHabitual();
   resetFormularioCargar();
 }
 
+// al salir de editar un movimiento en otra moneda, el formulario vuelve a la cuenta de siempre
+function volverACuentaHabitual() {
+  try {
+    const c = JSON.parse(localStorage.getItem(LS_CUENTA) || 'null');
+    if (!c || !MEDIOS_POR_MONEDA[c.moneda]) return;
+    estado.moneda = c.moneda;
+    $('moneda').value = c.moneda;
+    renderMedio('medioBtn', c.moneda, c.medio, fijarMedio);
+  } catch (err) { /* sin cuenta recordada */ }
+}
+
+let fechaAntesDeEditar = null; // { valor, dias } para volver a dejarla como estaba
+
 function abrirEdicion(mov) {
   cancelarLigar();
+  if (!editandoId) {
+    const activo = document.querySelector('#fechaChips .chip.active');
+    fechaAntesDeEditar = { valor: $('fecha').value, dias: activo && activo.dataset.dias !== undefined ? Number(activo.dataset.dias) : null };
+  }
+  categoriaOriginal = mov.categoria || '';
   editandoId = mov.id;
   mostrarVista('cargar');
 
   aplicarTipo(mov.tipo);
 
-  document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.remove('active'));
-  $('chipOtraFecha').classList.add('active');
-  $('fecha').classList.remove('oculto');
   const f = soloFecha(mov.fecha);
   $('fecha').value = fechaValida(f) ? f : ''; // una fecha rota en la planilla no se reemplaza por "hoy" en silencio
+  if (fechaValida(f)) marcarChipFecha(f);
+  else document.querySelectorAll('#fechaChips .chip').forEach(c => c.classList.toggle('active', c.id === 'chipOtraFecha'));
   actualizarFechaHint();
 
   estado.moneda = mov.moneda;
   $('moneda').value = mov.moneda;
   estado.medio = mov.medioPago;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
+  renderMedio('medioBtn', estado.moneda, estado.medio, fijarMedio);
 
   if (estado.tipo === 'Transferencia') {
     estado.monedaDestino = mov.monedaDestino;
     $('monedaDestino').value = mov.monedaDestino;
     estado.medioDestino = mov.medioPagoDestino;
-    renderMedioChips('medioChipsDestino', estado.monedaDestino, estado.medioDestino, (m) => { estado.medioDestino = m; });
+    renderMedio('medioDestinoBtn', estado.monedaDestino, estado.medioDestino, fijarMedioDestino);
     $('montoRecibido').value = mov.montoRecibido || '';
   } else {
-    renderCategoriaChips();
-    if (mov.categoria) seleccionarCategoria(mov.categoria, mov.subcategoria || '');
+    seleccionarCategoria(mov.categoria, mov.subcategoria || '');
   }
 
   $('monto').value = mov.monto;
-  if (esPrestamo(mov) && mov.tipo === 'Gasto') {
+  montoOriginalEdicion = Number(mov.monto);
+  // La persona se separa de la nota solo cuando la nota la escribió la propia app
+  // ("Préstamo X · algo") y el bloque de persona está a la vista. Antes se hacía con
+  // cualquier préstamo detectado: en uno de categoría Otros la nota se
+  // vaciaba, el bloque de persona quedaba oculto y al guardar sin tocar nada la nota
+  // llegaba vacía a la planilla y el préstamo desaparecía de Prestado.
+  const notaMov = String(mov.nota || '');
+  if (mov.tipo === 'Gasto' && mov.subcategoria === 'Préstamos' && RE_NOTA_PRESTAMO.test(notaMov)) {
+    const resto = notaMov.split(' · ');
     $('persona').value = personaDe(mov);
-    $('nota').value = '';
+    $('nota').value = resto.slice(1).join(' · ');
   } else {
     $('persona').value = '';
-    $('nota').value = mov.nota || '';
+    $('nota').value = notaMov;
   }
   actualizarBloquePrestamo();
   $('calcHint').textContent = '';
@@ -1072,6 +1253,7 @@ function guardarEdicion(id, mov) {
   vibrar(15);
   toast('Cambios guardados');
   editandoId = null;
+  volverACuentaHabitual();
   resetFormularioCargar();
   sincronizarCola();
 }
@@ -1082,7 +1264,12 @@ function guardarEdicion(id, mov) {
 // y se reintenta sola. Entrada: { uid, op: 'alta'|'editar'|'borrar'|'config', id?, mov?, clave?, valor?, intentos }
 function leerCola() {
   let cola;
-  try { cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]'); } catch (err) { cola = []; }
+  try { cola = JSON.parse(localStorage.getItem(LS_QUEUE) || '[]'); }
+  catch (err) {
+    // una cola ilegible no se pisa con la próxima escritura: se aparta para poder rescatarla
+    try { localStorage.setItem('mango_cola_rota_' + Date.now(), localStorage.getItem(LS_QUEUE) || ''); } catch (e) { /* sin lugar */ }
+    cola = [];
+  }
   // formato viejo: el movimiento suelto era un alta
   return cola.map(e => e.op ? e : { uid: 'legacy-' + e.id, op: 'alta', id: e.id, mov: e, intentos: 0 });
 }
@@ -1101,8 +1288,10 @@ function encolarOp(op) {
 // la lista local = lo que dice la planilla + lo que todavía no le llegó
 function aplicarCola(lista) {
   const cola = leerCola();
-  if (!cola.length) return lista;
-  const porId = new Map(lista.map(m => [m.id, m]));
+  // Por id siempre, haya cola o no: si la planilla tiene dos filas con el mismo id (un alta
+  // que se mandó dos veces) se muestra una sola. Y lo que está borrado esperando el
+  // "Deshacer" no vuelve a aparecer cuando llega una foto vieja de la planilla.
+  const porId = new Map(lista.filter(m => !borradosEnEspera.has(m.id)).map(m => [m.id, m]));
   cola.forEach(op => {
     if (op.op === 'alta') {
       porId.set(op.id, { ...(porId.get(op.id) || {}), ...op.mov, pendiente: true });
@@ -1113,6 +1302,7 @@ function aplicarCola(lista) {
       porId.delete(op.id);
     }
   });
+  borradosEnEspera.forEach((_, id) => porId.delete(id));
   return [...porId.values()];
 }
 
@@ -1142,6 +1332,14 @@ function confirmarOp(op, resp) {
 // se relee en cada paso: lo que se encole mientras tanto no se pierde.
 async function sincronizarCola() {
   if (sincronizando || !apiUrl()) return;
+  // con la app abierta en dos lados (la PWA y una pestaña), cada una subía la misma cola
+  if (navigator.locks && !sincronizarCola._conCandado) {
+    return navigator.locks.request('mango-cola', { ifAvailable: true }, async (candado) => {
+      if (!candado) return; // otra pestaña está subiendo
+      sincronizarCola._conCandado = true;
+      try { await sincronizarCola(); } finally { sincronizarCola._conCandado = false; }
+    });
+  }
   sincronizando = true;
   actualizarPill();
   try {
@@ -1149,9 +1347,17 @@ async function sincronizarCola() {
       const cola = leerCola();
       const op = cola.find(o => !o.bloqueada);
       if (!op) break;
+      // Un alta que ya salió y no contestó puede seguir corriendo en Apps Script. Si se
+      // reenvía enseguida, el backend publicado (sin lock) la agrega dos veces. Se espera
+      // un minuto y medio desde el último intento antes de volver a mandarla.
+      if (op.op === 'alta' && op.intentos && op.ultimoIntento && Date.now() - op.ultimoIntento < 90000) {
+        setTimeout(sincronizarCola, 90000 - (Date.now() - op.ultimoIntento) + 500);
+        break;
+      }
 
       // se anota el intento ANTES de mandar: si la respuesta se pierde, sabemos que pudo haber llegado
       op.intentos = (op.intentos || 0) + 1;
+      op.ultimoIntento = Date.now();
       escribirCola(cola);
 
       let resp;
@@ -1174,6 +1380,9 @@ async function sincronizarCola() {
       errorSync = '';
       escribirCola(leerCola().filter(o => o.uid !== op.uid));
       confirmarOp(op, resp);
+      if (op.op === 'editar' && resp && resp.encontrado === false) {
+        toast('Ojo: ese movimiento ya no estaba en la planilla, así que la corrección no se guardó. Cargalo de nuevo.', 8000);
+      }
     }
   } finally {
     sincronizando = false;
@@ -1230,9 +1439,18 @@ function agregarLocal(mov) {
 function enviarMovimiento(mov) {
   const completo = { ...mov, timestamp: tsLocal() };
   encolarOp({ op: 'alta', id: completo.id, mov: completo });
-  agregarLocal({ ...completo, pendiente: true });
+  // Desde acá el movimiento ya está a salvo en la cola. Si después falla el cache por
+  // falta de lugar, antes decía "No pude guardar" y al reintentar quedaba duplicado.
+  try { agregarLocal({ ...completo, pendiente: true }); }
+  catch (err) {
+    if (!movimientos.some(m => m.id === completo.id)) movimientos.unshift({ ...completo, pendiente: true });
+    toast('Guardado, pero el celu se quedó sin lugar para la copia local. Probá "Volver a bajar todo el historial" en ⚙️', 7000);
+    sincronizarCola();
+    return completo;
+  }
   vibrar(15);
-  toast(navigator.onLine === false ? 'Guardado en el celu; se sube cuando haya señal' : 'Guardado 🥭', 1800);
+  const dia = cuandoFue(completo.fecha);
+  toast(navigator.onLine === false ? `Guardado (${dia}) en el celu; se sube cuando haya señal` : `Guardado · ${dia} 🥭`, 2000);
   sincronizarCola();
   return completo;
 }
@@ -1258,8 +1476,9 @@ function numeroPlanilla(v) {
   if (v === null || v === undefined) return 0;
   const limpio = String(v).replace(/\s/g, '').replace(/[^\d,.-]/g, '');
   if (!limpio) return 0;
-  // si hay coma es el decimal y el punto es separador de miles; si no, manda el punto
-  const n = Number(limpio.includes(',') ? limpio.replace(/\./g, '').replace(',', '.') : limpio);
+  // misma regla que lo que se tipea (normalizarToken): antes eran dos reglas distintas
+  // y "1.500" valía 1500 al cargarlo y 1,5 al volver de la planilla
+  const n = Number(normalizarToken(limpio));
   return isFinite(n) ? n : 0;
 }
 
@@ -1315,6 +1534,7 @@ function guardarConfig(clave, valor) {
 // Baja el historial completo por tandas. De una sola vez, 2800 filas por Apps Script
 // se pasaban del timeout y quedaba silenciosamente sin historial. Cada tanda lee solo su rango.
 async function descargarHistorial(totalEsperado) {
+  const inicioBajada = Date.now();
   const migrados = [];
   const sueltos = [];   // lo que no es del historial: antes se descartaba y se confiaba
                         // en que "recientes" lo trajera igual; si no coincidían, se perdía
@@ -1349,6 +1569,12 @@ async function descargarHistorial(totalEsperado) {
 
   guardarLS(LS_CACHE_MIGRADOS, JSON.stringify(migrados, sinInternos));
   migradosMem = migrados;
+  if (ultimaConfirmacion > inicioBajada) {
+    // mientras bajaba, la planilla confirmó algo que esta foto no tiene: los recientes
+    // se quedan como están en memoria y la próxima sincronización trae la foto nueva
+    combinar(movimientos.filter(m => !esMigrado(m)), migrados);
+    return migrados.length;
+  }
   // la bajada completa es la foto buena de las dos partes, no solo del historial
   guardarLS(LS_CACHE_RECIENTES, JSON.stringify(sueltos, sinInternos));
   combinar(sueltos, migrados);
@@ -1410,6 +1636,16 @@ async function cargarTodoInterno(cachedRecientes) {
     if (sonda && !Array.isArray(sonda) && 'total' in sonda) {
       totalServidor = Number(sonda.total) || 0;
       recientesServidor = await bajarRecientes(totalServidor);
+      // Si la hoja no tiene lo reciente al final (alguien la ordenó por fecha o metió una
+      // fila a mano), la lectura desde abajo vuelve vacía. Eso no es "no hay recientes":
+      // se baja la hoja entera, que separa bien las dos partes, en vez de pintar cero.
+      let previos = 0;
+      try { previos = JSON.parse(cachedRecientes || '[]').length; } catch (err) { /* cache roto */ }
+      if (!recientesServidor.length && (previos > 0 || totalServidor > migradosLocales().length)) {
+        await descargarHistorial(totalServidor);
+        recientesServidor = movimientos.filter(m => !esMigrado(m) && !m.pendiente);
+        localStorage.setItem(LS_HIST_VER, String(config.historialVersion || ''));
+      }
     } else if (Array.isArray(sonda)) {
       // backend antiguo: ignora el rango y devuelve la hoja entera. Ya la tenemos acá,
       // así que no hace falta pedirla otra vez.
@@ -1487,8 +1723,24 @@ async function cargarTodoInterno(cachedRecientes) {
 
 // Al volver a la app (cambiar de pestaña, desbloquear el celu) se refresca sola,
 // así lo que cargaste en el otro dispositivo aparece sin tener que tocar nada.
+// La fecha elegida queda entre guardado y guardado, para cargar varios gastos del mismo
+// día atrasado. Pero si salís de la app y volvés más de media hora después, ya es otra
+// sesión de carga: vuelve a Hoy, así no se te va un gasto de hoy con la fecha de antes.
+let ocultoDesde = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') ocultoDesde = Date.now();
+});
+
 function refrescarSiHaceFalta() {
-  if (document.visibilityState !== 'visible' || !apiUrl()) return;
+  if (document.visibilityState !== 'visible') return;
+  if (ocultoDesde && Date.now() - ocultoDesde > 30 * 60 * 1000 && !editandoId) {
+    if (ligando) cancelarLigar();
+    // si quedó algo a medio cargar (fuiste a la app del banco a mirar el monto), no se toca
+    const aMedias = $('monto').value.trim() || $('nota').value.trim() || estado.categoria;
+    if (!aMedias) fijarFechaRelativa(0);
+  }
+  ocultoDesde = 0;
+  if (!apiUrl()) return;
   refrescarFechaChip();
   sincronizarCola();
   if (Date.now() - ultimaSync < 45000) return;
@@ -1537,9 +1789,10 @@ function agruparMovimientos(lista) {
 // El signo va explícito además del color: con sol fuerte el color solo no alcanza.
 function signoDe(m) { return m.tipo === 'Ingreso' ? '+' : (m.tipo === 'Gasto' ? '−' : ''); }
 function cuentaDe(m) {
-  return m.tipo === 'Transferencia'
-    ? `${m.moneda} ${m.medioPago} → ${m.monedaDestino} ${m.medioPagoDestino}`
-    : (m.medioPago || m.moneda);
+  if (m.tipo !== 'Transferencia') return m.medioPago || m.moneda;
+  const llego = m.monedaDestino && m.monedaDestino !== m.moneda && Number(m.montoRecibido) > 0
+    ? ` (llegaron ${fmt(m.montoRecibido, m.monedaDestino)})` : '';
+  return `${m.moneda} ${m.medioPago} → ${m.monedaDestino} ${m.medioPagoDestino}${llego}`;
 }
 
 // La nota es lo que identifica el gasto ("Coles", "Santarasa"), así que va de
@@ -1579,15 +1832,46 @@ function htmlGrupo(g) {
     </div>`;
 }
 
+// Una sola línea con lo último que cargaste, para chequear si ya lo anotaste sin que
+// ocupe media pantalla. Tocarla abre ese movimiento para corregirlo; la lista completa
+// está en Movimientos.
+function cuandoFue(f) {
+  const v = soloFecha(f);
+  const hoy = new Date();
+  const ayer = new Date(); ayer.setDate(ayer.getDate() - 1);
+  if (v === fechaLocalStr(hoy)) return 'hoy';
+  if (v === fechaLocalStr(ayer)) return 'ayer';
+  if (!fechaValida(v)) return v;
+  const [y, m, d] = v.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('es-AR', { day: 'numeric', month: 'short' }).replace(/\./g, '');
+}
+
 function renderUltimos() {
-  const cont = $('ultimosMovimientos');
-  const entradas = agruparMovimientos(movimientos.slice(0, 12)).slice(0, 5);
-  if (!entradas.length) {
-    cont.innerHTML = '<div class="vacio">Todavía no cargaste nada. Ni un mango 🥭</div>';
+  const cont = $('ultimoLinea');
+  if (!cont) return;
+  // lo último que guardaste en esta sesión, aunque tenga fecha vieja; si no, lo más nuevo
+  const m = (ultimoGuardado && movimientos.find(x => x.id === ultimoGuardado.id)) || movimientos[0];
+  if (!m) {
+    cont.innerHTML = '<span class="ultimo-vacio">Todavía no cargaste nada. Ni un mango 🥭</span>';
     return;
   }
-  cont.innerHTML = entradas.map(e => e.mov ? htmlFila(e.mov, 'mini') : htmlGrupo(e)).join('');
+  const titulo = String(m.nota || '').trim() || nombreMov(m);
+  const ligable = !!ultimoGuardado && m.id === ultimoGuardado.id && m.tipo === 'Gasto' && !editandoId && estado.tipo === 'Gasto';
+  cont.innerHTML =
+    `<button type="button" class="ultimo-btn" data-id="${esc(m.id)}" aria-label="Corregir el último movimiento">` +
+      `<span class="ultimo-txt">${m.pendiente ? '⏳ ' : ''}Último, ${esc(cuandoFue(m.fecha))}: ${esc(titulo)}</span>` +
+      `<b class="${(m.tipo || 'Gasto').toLowerCase()}">${signoDe(m)}${fmt(m.monto, m.moneda)}</b>` +
+    `</button>` +
+    (ligable ? `<button type="button" class="ligar-mini" id="ligarBtn" title="Cuando un gasto sale como varios cargos: envío, propina, dos pagos">🔗 ${m.grupo ? 'Otro más' : 'Ligar'}</button>` : '');
 }
+
+$('ultimoLinea').addEventListener('click', (e) => {
+  if (e.target.closest('#ligarBtn')) { iniciarLigar(); return; }
+  const b = e.target.closest('.ultimo-btn');
+  if (!b) return;
+  const mov = movimientos.find(m => m.id === b.dataset.id);
+  if (mov) abrirEdicion(mov);
+});
 
 // un solo listener por lista (delegación): no importa cuántas filas haya
 function delegarLista(cont) {
@@ -1618,7 +1902,6 @@ function delegarLista(cont) {
     }
   });
 }
-delegarLista($('ultimosMovimientos'));
 delegarLista($('listaMovimientos'));
 
 function poblarFiltroMeses() {
@@ -1659,6 +1942,10 @@ function filtrarMovimientos() {
   const filtroMoneda = $('filtroMoneda').value;
   const filtroMes = $('filtroMes').value;
   const q = sinAcentos($('buscar').value.trim());
+  // si buscás, la búsqueda recorre todos los meses: el selector de mes se apaga para que
+  // no parezca que el total es del mes elegido
+  $('filtroMes').disabled = !!q;
+  $('filtroMes').title = q ? 'Buscando en todos los meses' : '';
   return movimientos.filter(m =>
     (!filtroTipo || m.tipo === filtroTipo) &&
     (!filtroMoneda || m.moneda === filtroMoneda) &&
@@ -1723,24 +2010,30 @@ function totalDelDia(dia) {
   const porMoneda = {};
   entradasRender.forEach(e => {
     (e.mov ? [e.mov] : e.miembros).forEach(m => {
-      if (soloFecha(m.fecha) !== dia || m.tipo !== 'Gasto') return;
+      if (soloFecha(m.fecha) !== dia || m.tipo !== 'Gasto' || !esConsumo(m)) return;
       porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + (Number(m.monto) || 0);
     });
   });
   return Object.entries(porMoneda).map(([mon, v]) => `−${fmt(v, mon)}`).join(' · ');
 }
 
+// Los totales dicen lo mismo que el Resumen: el gasto es consumo. Préstamos, inversiones
+// y cambios de moneda van en un chip aparte; antes se sumaban al gasto y el mismo mes
+// daba miles acá y unos cientos en Resumen.
 function renderTotales(lista) {
   const porMoneda = {};
   lista.forEach(m => {
     if (m.tipo === 'Transferencia') return;
-    porMoneda[m.moneda] = porMoneda[m.moneda] || { gasto: 0, ingreso: 0 };
-    if (m.tipo === 'Ingreso') porMoneda[m.moneda].ingreso += Number(m.monto) || 0;
-    else porMoneda[m.moneda].gasto += Number(m.monto) || 0;
+    const t = porMoneda[m.moneda] = porMoneda[m.moneda] || { gasto: 0, ingreso: 0, otro: 0 };
+    const monto = Number(m.monto) || 0;
+    if (m.tipo === 'Ingreso') t.ingreso += monto;
+    else if (esConsumo(m)) t.gasto += monto;
+    else t.otro += monto;
   });
   $('totales').innerHTML = Object.entries(porMoneda).map(([moneda, t]) =>
     `<div class="total-chip">💸 <b class="gasto">${fmt(t.gasto, moneda)}</b></div>
-     <div class="total-chip">💰 <b class="ingreso">${fmt(t.ingreso, moneda)}</b></div>`
+     <div class="total-chip">💰 <b class="ingreso">${fmt(t.ingreso, moneda)}</b></div>` +
+    (t.otro ? `<div class="total-chip" title="Préstamos, inversiones y cambios de moneda: salieron, pero no son gasto">↪ <b>${fmt(t.otro, moneda)}</b> no es gasto</div>` : '')
   ).join('') || '';
 }
 
@@ -1766,7 +2059,6 @@ function toastAccion(msg, etiqueta, accion, ms) {
 // Borrar sin cartel de confirmación: se saca al instante, con 5 segundos para deshacer.
 // Recién después se anota en la cola. Si la app se va a segundo plano antes, se anota ya
 // (si no, el timer nunca corre y el movimiento vuelve a aparecer en el próximo refresco).
-const borradosEnEspera = new Map(); // id -> { mov, timer, confirmar }
 
 function confirmarBorrado(id) {
   const b = borradosEnEspera.get(id);
@@ -1797,14 +2089,18 @@ function borrarMovimiento(id) {
     if (!b) return;
     clearTimeout(b.timer);
     borradosEnEspera.delete(id);
-    movimientos.push(mov);
+    if (!movimientos.some(m => m.id === id)) movimientos.push(mov);
     despuesDeCambiar(esMigrado(mov));
   }, 5000);
   return true;
 }
 
 function confirmarBorradosPendientes() {
+  if (!borradosEnEspera.size) return;
   [...borradosEnEspera.keys()].forEach(confirmarBorrado);
+  // el "Deshacer" ya no puede deshacer nada: que no quede un botón que no hace nada
+  const t = $('toast');
+  if (t._accion) { t.classList.remove('show'); t.innerHTML = ''; t._accion = false; }
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') confirmarBorradosPendientes(); });
 window.addEventListener('pagehide', confirmarBorradosPendientes);
@@ -1817,51 +2113,86 @@ function medioDesdeClave(moneda, medioCrudo) {
   return match ? match.v : medioCrudo;
 }
 
-// saldo = ancla manual (saldoInicial_*) + suma de los movimientos NO migrados
+// Dos formas de anclar una cuenta:
+// - saldoAjuste_<MON>_<medio> = {"saldo", "fecha", "ts"}: el saldo real que viste en el
+//   banco ese día. Se suman solo los movimientos POSTERIORES: uno con fecha anterior que
+//   cargás después ya estaba reflejado en el banco, así que no mueve el saldo. (Antes
+//   cargar un gasto viejo después de ajustar dejaba el saldo corrido.)
+// - saldoInicial_<MON>_<medio> (formato viejo, sin fecha): + todos los no migrados.
+// Una cuenta sin ninguna de las dos no tiene saldo conocido: se muestra "sin ajustar".
+function leerAjuste(v) {
+  try { const a = typeof v === 'string' ? JSON.parse(v) : v; return a && fechaValida(a.fecha) && isFinite(Number(a.saldo)) ? a : null; }
+  catch (err) { return null; }
+}
+
+function cuentaAfecta(m, a) {
+  if (soloFecha(m.fecha) > a.fecha) return true;
+  if (soloFecha(m.fecha) < a.fecha) return false;
+  // mismo día que el ajuste: cuenta solo lo que se cargó después de ajustar
+  return !!m.pendiente || (/^\d{4}-\d{2}-\d{2}T/.test(m.timestamp || '') && m.timestamp > a.ts);
+}
+
 function calcularSaldos() {
   const saldos = {};
-  const anclas = {};
+  const anclas = {};      // saldoInicial viejo
+  const ajustes = {};     // saldoAjuste con fecha
   Object.keys(config).forEach(k => {
-    const m = k.match(/^saldoInicial_([A-Z]{3})_(.+)$/);
+    let m = k.match(/^saldoAjuste_([A-Z]{3})_(.+)$/);
     if (m) {
-      const cuenta = `${m[1]} ${medioDesdeClave(m[1], m[2])}`;
-      anclas[cuenta] = Number(config[k]) || 0;
-      saldos[cuenta] = anclas[cuenta];
+      const a = leerAjuste(config[k]);
+      if (a) ajustes[`${m[1]} ${medioDesdeClave(m[1], m[2])}`] = a;
+      return;
     }
+    m = k.match(/^saldoInicial_([A-Z]{3})_(.+)$/);
+    if (m) anclas[`${m[1]} ${medioDesdeClave(m[1], m[2])}`] = Number(config[k]) || 0;
   });
+  const conocidas = new Set([...Object.keys(anclas), ...Object.keys(ajustes)]);
+  conocidas.forEach(c => { saldos[c] = ajustes[c] ? Number(ajustes[c].saldo) : anclas[c]; });
+
+  const mover = (cuenta, delta, m) => {
+    if (!conocidas.has(cuenta)) { saldos[cuenta] = null; return; } // cuenta sin ajustar: aparece, sin número
+    const a = ajustes[cuenta];
+    if (a ? !cuentaAfecta(m, a) : esMigrado(m)) return;
+    saldos[cuenta] += delta;
+  };
   movimientos.forEach(m => {
-    if (esMigrado(m)) return;
     const monto = Number(m.monto) || 0;
-    if (m.tipo === 'Ingreso') {
-      const k = `${m.moneda} ${m.medioPago}`;
-      saldos[k] = (saldos[k] || 0) + monto;
-    } else if (m.tipo === 'Gasto') {
-      const k = `${m.moneda} ${m.medioPago}`;
-      saldos[k] = (saldos[k] || 0) - monto;
-    } else if (m.tipo === 'Transferencia') {
-      const kO = `${m.moneda} ${m.medioPago}`;
-      const kD = `${m.monedaDestino} ${m.medioPagoDestino}`;
-      saldos[kO] = (saldos[kO] || 0) - monto;
-      saldos[kD] = (saldos[kD] || 0) + (Number(m.montoRecibido) || 0);
+    if (m.tipo === 'Ingreso') mover(`${m.moneda} ${m.medioPago}`, monto, m);
+    else if (m.tipo === 'Gasto') mover(`${m.moneda} ${m.medioPago}`, -monto, m);
+    else if (m.tipo === 'Transferencia') {
+      mover(`${m.moneda} ${m.medioPago}`, -monto, m);
+      mover(`${m.monedaDestino} ${m.medioPagoDestino}`, Number(m.montoRecibido) || 0, m);
     }
   });
-  return { saldos, anclas };
+  // las cuentas sin ajustar que solo aparecen en el historial viejo no se listan
+  Object.keys(saldos).forEach(c => {
+    if (saldos[c] === null && !movimientos.some(m => !esMigrado(m) && (`${m.moneda} ${m.medioPago}` === c || `${m.monedaDestino} ${m.medioPagoDestino}` === c))) delete saldos[c];
+  });
+  return { saldos, anclas, ajustes };
+}
+
+const ORDEN_MONEDAS = ['AUD', 'EUR', 'ARS', 'USD'];
+function ordenCuentas(a, b) {
+  const [ma, ...ra] = a.split(' '); const [mb, ...rb] = b.split(' ');
+  const d = (ORDEN_MONEDAS.indexOf(ma) + 99) % 99 - (ORDEN_MONEDAS.indexOf(mb) + 99) % 99;
+  return d || ra.join(' ').localeCompare(rb.join(' '));
 }
 
 function renderActivos() {
   if (!mesResumen) mesResumen = fechaLocalStr(new Date()).slice(0, 7);
 
   const { saldos } = calcularSaldos();
-  const entradas = Object.entries(saldos);
+  const entradas = Object.entries(saldos).sort((a, b) => ordenCuentas(a[0], b[0]));
   $('saldosCuentas').innerHTML = entradas.length
-    ? entradas.map(([cuenta, saldo]) => {
-        return `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo)}</b></div>`;
-      }).join('')
+    ? entradas.map(([cuenta, saldo]) => saldo === null
+        ? `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="sin-ajustar">poné el saldo real ›</b></div>`
+        : `<div class="saldo-row" data-cuenta="${esc(cuenta)}"><span>${esc(cuenta)}</span><b class="${saldo < 0 ? 'neg' : 'pos'}">${fmt(saldo)}</b></div>`
+      ).join('')
     : '<div class="vacio">Todavía no hay movimientos</div>';
 
   renderResumenMes();
   renderTendencia();
-  $('patrimonioInput').value = patrimonio || '';
+  if (document.activeElement !== $('patrimonioInput')) $('patrimonioInput').value = patrimonio || '';
 }
 
 $('saldosCuentas').addEventListener('click', (e) => {
@@ -1871,7 +2202,10 @@ $('saldosCuentas').addEventListener('click', (e) => {
 });
 
 $('mesAnteriorBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, -1); catAbierta = null; renderResumenMes(); });
-$('mesSiguienteBtn').addEventListener('click', () => { mesResumen = sumarMeses(mesResumen, 1); catAbierta = null; renderResumenMes(); });
+$('mesSiguienteBtn').addEventListener('click', () => {
+  if (mesResumen >= fechaLocalStr(new Date()).slice(0, 7)) return;
+  mesResumen = sumarMeses(mesResumen, 1); catAbierta = null; renderResumenMes();
+});
 
 let catAbierta = null;        // categoría desplegada en el resumen
 let monedaTendencia = null;   // moneda elegida en el gráfico de 6 meses
@@ -1911,13 +2245,13 @@ function promedioCategorias(ym, moneda, cantidad = 6) {
   return { prom, presencias, promTotal: totalSuma / cantidad };
 }
 
-function htmlDelta(actual, promedio, presencias) {
+function htmlDelta(actual, promedio, presencias, aEstaAltura = false) {
   // con pocos datos el porcentaje miente: un solo regalo da +400%
   if (presencias < 3 || promedio < 1) return '';
   const pct = Math.round((actual - promedio) / promedio * 100);
-  if (Math.abs(pct) < 15) return '<span class="delta igual">igual que siempre</span>';
+  if (Math.abs(pct) < 15) return `<span class="delta igual">${aEstaAltura ? 'como siempre a esta altura' : 'igual que siempre'}</span>`;
   const clase = pct > 0 ? 'sube' : 'baja';
-  return `<span class="delta ${clase}">${pct > 0 ? '+' : ''}${pct}% vs promedio</span>`;
+  return `<span class="delta ${clase}">${pct > 0 ? '+' : ''}${pct}% vs ${aEstaAltura ? 'otros meses a esta altura' : 'promedio'}</span>`;
 }
 
 function renderResumenMes() {
@@ -1927,6 +2261,7 @@ function renderResumenMes() {
   const diaDeHoy = esMesActual ? hoy.getDate() : diasDelMes(mesResumen);
 
   $('mesTitulo').textContent = nombreMes(mesResumen);
+  $('mesSiguienteBtn').disabled = mesResumen >= mesHoy;
   $('mesSub').textContent = esMesActual
     ? `En curso · día ${diaDeHoy} de ${diasDelMes(mesResumen)}`
     : '';
@@ -1951,7 +2286,11 @@ function renderResumenMes() {
     else if (p[clase] !== undefined) p[clase] += monto;
   });
 
-  const monedas = Object.keys(porMoneda).sort((a, b) => porMoneda[b].gasto - porMoneda[a].gasto);
+  // Orden por cantidad de movimientos, no por monto: un alquiler en pesos son millones y
+  // le ganaba a un mes entero en AUD, y el Ritmo del mes salía en ARS.
+  const cuantos = {};
+  delMes.forEach(m => { cuantos[m.moneda] = (cuantos[m.moneda] || 0) + 1; });
+  const monedas = Object.keys(porMoneda).sort((a, b) => cuantos[b] - cuantos[a]);
 
   $('resumenMes').innerHTML = monedas.map(moneda => {
     const p = porMoneda[moneda];
@@ -1987,7 +2326,11 @@ function renderResumenMes() {
               </div>
               <div class="barra-sub">
                 <span class="barra-pct">${pct}% del gasto</span>
-                ${htmlDelta(valor, prom[cat] || 0, presencias[cat] || 0)}
+                ${esMesActual
+                  // en el mes en curso se compara contra lo esperable a esta altura, y
+                  // la primera semana no se compara: un alquiler el día 1 lo distorsiona todo
+                  ? (diaDeHoy >= 7 ? htmlDelta(valor, (prom[cat] || 0) * diaDeHoy / diasDelMes(mesResumen), presencias[cat] || 0, true) : '')
+                  : htmlDelta(valor, prom[cat] || 0, presencias[cat] || 0)}
               </div>
               <div class="barra-pista"><div class="barra" style="width:${Math.max(2, valor / max * 100)}%"></div></div>
               ${abierta ? detalleCategoria(mesResumen, moneda, cat) : ''}
@@ -2042,8 +2385,9 @@ function renderRitmo(porMoneda, monedas, esMesActual, dia) {
 
   // La proyección usa el ritmo de los meses anteriores, no el de este mes:
   // si el alquiler cae el día 1, extrapolar el propio mes da un disparate.
-  const promDiaHistorico = promTotal > 0 ? promTotal / 30 : porDia;
-  const proyeccion = gastado + promDiaHistorico * Math.max(0, total - dia);
+  // Sin meses anteriores en esa moneda no hay base: extrapolar el propio mes da cualquier cosa.
+  const hayHistoria = promTotal > 0;
+  const proyeccion = hayHistoria ? gastado + (promTotal / 30) * Math.max(0, total - dia) : gastado;
   const referencia = promTotal > 0 ? promTotal : proyeccion;
   const escala = Math.max(proyeccion, referencia, 1);
 
@@ -2053,7 +2397,7 @@ function renderRitmo(porMoneda, monedas, esMesActual, dia) {
       <div class="ritmo-cifras">
         <div class="ritmo-item"><div class="r-label">Llevás</div><div class="r-valor">${fmtStat(gastado)}</div></div>
         <div class="ritmo-item"><div class="r-label">Por día</div><div class="r-valor">${fmtStat(porDia)}</div></div>
-        <div class="ritmo-item"><div class="r-label">Proyección</div><div class="r-valor">${fmtStat(proyeccion)}</div></div>
+        <div class="ritmo-item"><div class="r-label">Proyección</div><div class="r-valor">${hayHistoria ? fmtStat(proyeccion) : '—'}</div></div>
       </div>
       <div class="ritmo-pista">
         <div class="ritmo-barra${promTotal > 0 && proyeccion > promTotal ? ' pasado' : ''}" style="width:${Math.min(100, gastado / escala * 100)}%"></div>
@@ -2104,9 +2448,9 @@ function renderTendencia() {
     porMoneda[m.moneda][mes] = (porMoneda[m.moneda][mes] || 0) + (Number(m.monto) || 0);
   });
 
-  const monedas = Object.keys(porMoneda)
-    .sort((a, b) => Object.values(porMoneda[b]).reduce((x, y) => x + y, 0)
-                  - Object.values(porMoneda[a]).reduce((x, y) => x + y, 0));
+  const cuantos = {};
+  movimientos.forEach(m => { if (m.tipo === 'Gasto' && meses.includes(mesDe(m.fecha))) cuantos[m.moneda] = (cuantos[m.moneda] || 0) + 1; });
+  const monedas = Object.keys(porMoneda).sort((a, b) => (cuantos[b] || 0) - (cuantos[a] || 0));
   if (!monedas.length) {
     $('monedasTendencia').innerHTML = '';
     $('tendencia').innerHTML = '<div class="vacio">Sin gastos en los últimos 6 meses</div>';
@@ -2161,10 +2505,24 @@ function prestamosActivos() {
     .sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
 }
 
+// Modo revisión: muchos "préstamos" detectados son deudas viejas ya saldadas o pagos de
+// deudas propias (la app los reconoce por la palabra "deuda"). En vez de marcarlos de a
+// uno, se tocan los que todavía te deben y el resto pasa a Saldados de una sola vez.
+let revisandoPrestamos = false;
+let sigueDebiendo = new Set();
+
+function fechaSaldado(m) {
+  const v = String(config[claveDevuelto(m.id)] || '');
+  return fechaValida(v) ? v : '';
+}
+
 function renderPrestado() {
   const todos = prestamosActivos();
   const activos = todos.filter(m => !estaDevuelto(m));
-  const devueltos = todos.filter(estaDevuelto).slice(0, 12);
+  // los saldados más recientes primero (por el día en que se saldaron)
+  const saldados = todos.filter(estaDevuelto)
+    .sort((a, b) => (fechaSaldado(a) < fechaSaldado(b) ? 1 : -1));
+  if (!activos.length) revisandoPrestamos = false;
 
   const porMoneda = {};
   activos.forEach(m => { porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + (Number(m.monto) || 0); });
@@ -2172,52 +2530,123 @@ function renderPrestado() {
 
   $('prestadoTotales').innerHTML = monedas.length
     ? monedas.map(([mon, v]) => `<div class="hero-monto">${fmt(v, mon)}</div>`).join('') +
-      `<div class="hero-sub">${activos.length} préstamo${activos.length === 1 ? '' : 's'} sin volver${devueltos.length ? ` · ${devueltos.length} ya devuelto${devueltos.length === 1 ? '' : 's'}` : ''}</div>`
-    : '<div class="hero-monto">Nada</div><div class="hero-sub">No le prestaste plata a nadie</div>';
+      `<div class="hero-sub">${activos.length} préstamo${activos.length === 1 ? '' : 's'} sin volver${saldados.length ? ` · ${saldados.length} saldado${saldados.length === 1 ? '' : 's'}` : ''}</div>`
+    : '<div class="hero-monto">Nada</div><div class="hero-sub">Nadie te debe plata</div>';
 
-  $('prestadoLista').innerHTML = activos.map(m => htmlPrestamo(m, false)).join('');
-  $('prestadoDevueltos').innerHTML = devueltos.length
-    ? `<div class="card-title" style="margin-top:20px">Devueltos</div>` + devueltos.map(m => htmlPrestamo(m, true)).join('')
+  if (revisandoPrestamos) {
+    const pasan = activos.filter(m => !sigueDebiendo.has(m.id)).length;
+    $('prestadoLista').innerHTML =
+      `<div class="revision-ayuda">Tocá los que <b>todavía te deben</b>. El resto pasa a Saldados (se puede deshacer).</div>` +
+      activos.map(m => htmlPrestamo(m, 'revision')).join('') +
+      `<div class="revision-acciones">
+        <button type="button" class="secondary" id="cancelarRevisionBtn">Cancelar</button>
+        <button type="button" class="primary" id="confirmarRevisionBtn">${pasan ? `Listo · ${pasan} pasan a Saldados` : 'Listo · no cambia nada'}</button>
+      </div>`;
+    $('prestadoDevueltos').innerHTML = '';
+    $('prestarBtn').classList.add('oculto');
+    return;
+  }
+  $('prestarBtn').classList.remove('oculto');
+  $('prestadoLista').innerHTML =
+    (activos.length > 1 ? `<button type="button" class="link-btn" id="revisarPrestamosBtn">Revisar cuáles siguen pendientes</button>` : '') +
+    activos.map(m => htmlPrestamo(m, 'activo')).join('');
+  $('prestadoDevueltos').innerHTML = saldados.length
+    ? `<details class="saldados"><summary class="card-title">Saldados (${saldados.length})</summary>${saldados.map(m => htmlPrestamo(m, 'saldado')).join('')}</details>`
     : '';
 }
 
-function htmlPrestamo(m, devuelto) {
+function htmlPrestamo(m, modo) {
   const persona = personaDe(m);
+  const saldado = modo === 'saldado';
+  const cuando = saldado
+    ? (fechaSaldado(m) ? `Saldado el ${fechaCorta(fechaSaldado(m))}` : 'Saldado')
+    : `Prestado el ${fechaCorta(soloFecha(m.fecha))}`;
+  const accion = modo === 'revision'
+    ? `<button type="button" class="prestamo-sigue${sigueDebiendo.has(m.id) ? ' on' : ''}" data-sigue="${esc(m.id)}" aria-pressed="${sigueDebiendo.has(m.id)}">${sigueDebiendo.has(m.id) ? '☑' : '☐'} Todavía me debe</button>`
+    : `<button type="button" class="prestamo-saldar" data-saldar="${esc(m.id)}">${saldado ? 'Volver a pendiente' : 'Marcar como saldado ✓'}</button>`;
   return `
-    <div class="prestamo-card${devuelto ? ' devuelto' : ''}" data-id="${esc(m.id)}">
+    <div class="prestamo-card${saldado ? ' devuelto' : ''}${modo === 'revision' && sigueDebiendo.has(m.id) ? ' sigue' : ''}" data-id="${esc(m.id)}">
       <div class="prestamo-top">
         <div class="avatar">${esc(iniciales(persona))}</div>
         <div class="prestamo-info">
           <div class="prestamo-nombre">${esc(persona)}</div>
-          <div class="prestamo-fecha">${devuelto ? 'Devuelto' : 'Prestado'} el ${esc(fechaCorta(soloFecha(m.fecha)))} · ${esc(m.medioPago || '')}</div>
+          <div class="prestamo-fecha">${esc(cuando)} · ${esc(m.medioPago || '')}</div>
         </div>
         <div class="prestamo-monto">
           <div class="m">${fmt(m.monto)}</div>
           <div class="c">${esc(m.moneda)}</div>
         </div>
       </div>
-      <button type="button" class="prestamo-saldar" data-saldar="${esc(m.id)}">
-        ${devuelto ? 'Marcar como no devuelto' : 'Marcar como devuelto ✓'}
-      </button>
+      ${accion}
     </div>`;
 }
 
 $('view-prestado').addEventListener('click', (e) => {
+  if (e.target.closest('#revisarPrestamosBtn')) {
+    revisandoPrestamos = true;
+    sigueDebiendo = new Set();
+    renderPrestado();
+    window.scrollTo({ top: 0 });
+    return;
+  }
+  if (e.target.closest('#cancelarRevisionBtn')) { revisandoPrestamos = false; renderPrestado(); return; }
+  if (e.target.closest('#confirmarRevisionBtn')) {
+    const hoy = fechaLocalStr(new Date());
+    const pasan = prestamosActivos().filter(m => !estaDevuelto(m) && !sigueDebiendo.has(m.id));
+    revisandoPrestamos = false;
+    if (!pasan.length) { toast('No cambió nada'); renderPrestado(); return; }
+    // Se marcan ya en pantalla, pero se mandan a la planilla recién cuando vence el
+    // "Deshacer" (o enseguida si la app pasa a segundo plano), como el borrado.
+    pasan.forEach(m => { config[claveDevuelto(m.id)] = hoy; });
+    renderPrestado();
+    vibrar(15);
+    let hecho = false;
+    const confirmar = () => {
+      if (hecho) return; hecho = true;
+      window.removeEventListener('pagehide', confirmar);
+      document.removeEventListener('visibilitychange', alOcultar);
+      // los que volviste a pendiente mientras tanto no se saldan
+      try { pasan.filter(m => config[claveDevuelto(m.id)] === hoy).forEach(m => guardarConfig(claveDevuelto(m.id), hoy)); }
+      catch (err) { toast(`No pude guardar: ${err.message}`, 6000); }
+    };
+    const alOcultar = () => { if (document.visibilityState === 'hidden') confirmar(); };
+    window.addEventListener('pagehide', confirmar);
+    document.addEventListener('visibilitychange', alOcultar);
+    const timer = setTimeout(confirmar, 6000);
+    toastAccion(`${pasan.length} pasaron a Saldados`, 'Deshacer', () => {
+      if (hecho) { pasan.forEach(m => guardarConfig(claveDevuelto(m.id), '')); renderPrestado(); return; }
+      hecho = true; clearTimeout(timer);
+      window.removeEventListener('pagehide', confirmar);
+      document.removeEventListener('visibilitychange', alOcultar);
+      pasan.forEach(m => { delete config[claveDevuelto(m.id)]; });
+      renderPrestado();
+    }, 5800);
+    return;
+  }
+  const sigue = e.target.closest('[data-sigue]');
+  if (sigue) {
+    const id = sigue.dataset.sigue;
+    if (sigueDebiendo.has(id)) sigueDebiendo.delete(id); else sigueDebiendo.add(id);
+    renderPrestado();
+    return;
+  }
   const btn = e.target.closest('[data-saldar]');
   if (btn) {
     const id = btn.dataset.saldar;
     const mov = movimientos.find(m => m.id === id);
     if (!mov) return;
     try {
-      guardarConfig(claveDevuelto(id), estaDevuelto(mov) ? '' : fechaLocalStr(new Date()));
+      const yaEstaba = estaDevuelto(mov);
+      guardarConfig(claveDevuelto(id), yaEstaba ? '' : fechaLocalStr(new Date()));
       vibrar(15);
-      toast(estaDevuelto(mov) ? `${personaDe(mov)} te devolvió` : 'Vuelve a figurar como prestado');
+      toast(yaEstaba ? 'Vuelve a figurar como pendiente' : `${personaDe(mov)}: saldado`);
       renderPrestado();
     } catch (err) {
       toast(`No pude guardar: ${err.message}`, 6000);
     }
     return;
   }
+  if (revisandoPrestamos) return; // en revisión, tocar la tarjeta no abre la edición
   const card = e.target.closest('.prestamo-card');
   if (card) {
     const mov = movimientos.find(m => m.id === card.dataset.id);
@@ -2226,6 +2655,7 @@ $('view-prestado').addEventListener('click', (e) => {
 });
 
 $('prestarBtn').addEventListener('click', () => {
+  cancelarLigar();
   cancelarEdicion();
   mostrarVista('cargar');
   aplicarTipo('Gasto');
@@ -2240,7 +2670,9 @@ function abrirAjuste(cuenta) {
   const { saldos } = calcularSaldos();
   const moneda = cuenta.split(' ')[0];
   $('ajusteTitulo').textContent = `Ajustar ${cuenta}`;
-  $('ajusteEstimado').textContent = `Mango calcula ${fmt(saldos[cuenta] || 0, moneda)}.`;
+  $('ajusteEstimado').textContent = saldos[cuenta] === null || saldos[cuenta] === undefined
+    ? 'Todavía no le pusiste el saldo real a esta cuenta.'
+    : `Mango calcula ${fmt(saldos[cuenta], moneda)}.`;
   $('ajusteInput').value = '';
   $('ajusteOverlay').classList.add('active');
   setTimeout(() => $('ajusteInput').focus(), 50);
@@ -2252,13 +2684,11 @@ $('guardarAjusteBtn').addEventListener('click', () => {
   const cuenta = ajusteCuenta;
   const [moneda, ...resto] = cuenta.split(' ');
   const medio = resto.join(' ');
-  const { saldos, anclas } = calcularSaldos();
-  const anclaActual = anclas[cuenta] || 0;
-  const sumaMovs = (saldos[cuenta] || 0) - anclaActual;
-  const nuevaAncla = Math.round((real - sumaMovs) * 100) / 100;
+  // Se guarda el saldo real con la fecha y la hora de hoy (ver calcularSaldos).
+  const ajuste = { saldo: Math.round(real * 100) / 100, fecha: fechaLocalStr(new Date()), ts: tsLocal() };
 
   try {
-    guardarConfig(`saldoInicial_${moneda}_${medio}`, nuevaAncla);
+    guardarConfig(`saldoAjuste_${moneda}_${medio}`, JSON.stringify(ajuste));
   } catch (err) {
     toast(`No pude guardar: ${err.message}`, 6000);
     return;
@@ -2285,6 +2715,9 @@ $('guardarPatrimonioBtn').addEventListener('click', () => {
 // Se puede recargar sola sin pisarle nada a nadie si no hay nada a medio cargar.
 function seguroRecargar() {
   if (editandoId || ligando) return false;
+  // una fecha, moneda o categoría ya elegidas se perderían con la recarga
+  if (estado.categoria || estado.tipo !== 'Gasto') return false;
+  if (!document.querySelector('#fechaChips .chip[data-dias="0"].active')) return false;
   if (document.querySelector('.overlay.active')) return false;
   if ($('monto').value.trim() || $('nota').value.trim()) return false;
   return leerCola().length === 0;
@@ -2305,12 +2738,17 @@ if ('serviceWorker' in navigator) {
 // ---------- Init ----------
 function init() {
   document.body.classList.add('vista-cargar');
+  // arranca en la última cuenta usada: en Europa EUR, en Australia y Bali AUD
+  try {
+    const c = JSON.parse(localStorage.getItem(LS_CUENTA) || 'null');
+    if (c && MEDIOS_POR_MONEDA[c.moneda]) { estado.moneda = c.moneda; estado.medio = c.medio; }
+  } catch (err) { /* sin cuenta recordada */ }
   $('fecha').value = fechaLocalStr(new Date());
   actualizarFechaHint();
   $('moneda').value = estado.moneda;
   $('monedaDestino').value = estado.monedaDestino;
-  renderMedioChips('medioChips', estado.moneda, estado.medio, fijarMedio);
-  renderMedioChips('medioChipsDestino', estado.monedaDestino, estado.medioDestino, (m) => { estado.medioDestino = m; });
+  renderMedio('medioBtn', estado.moneda, estado.medio, fijarMedio);
+  renderMedio('medioDestinoBtn', estado.monedaDestino, estado.medioDestino, fijarMedioDestino);
 
   // primero lo que ya tenemos en el celu, al instante
   const cachedCat = localStorage.getItem(LS_CACHE_CAT);
@@ -2336,6 +2774,7 @@ function init() {
     $('configOverlay').classList.add('active');
     return;
   }
+  sincronizarCola(); // lo pendiente sube ya, sin esperar a que termine (o falle) la carga
   cargarTodo();
   if (!editandoId) $('monto').focus();
 }

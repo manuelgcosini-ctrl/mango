@@ -23,6 +23,8 @@
   --r-card: 16px;
   --r-ctrl: 12px;
   --tap: 48px;                /* nada interactivo mide menos */
+  --alto-header: 52px;
+  --alto-tabs: 62px;          /* sin contar el área segura de abajo */
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -51,7 +53,8 @@ body {
 
 /* ---------- Header ---------- */
 header {
-  padding: 14px 16px 8px;
+  height: var(--alto-header);
+  padding: 4px 8px 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -80,7 +83,7 @@ header h1 { font-size: 20px; margin: 0; font-weight: 700; color: var(--accent); 
 .sync-pill.error { background: var(--danger); color: #fff; }
 .sync-pill.subiendo { background: var(--card-alto); color: var(--accent); }
 
-main { padding: 0 16px; max-width: 480px; margin: 0 auto; }
+main { padding: 0 12px; max-width: 480px; margin: 0 auto; }
 .view { display: none; }
 .view.active { display: block; animation: fadein .16s ease; }
 @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
@@ -187,21 +190,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .notas-chips:empty { display: none; }
 .chips-moneda { margin-bottom: 12px; }
 
-/* ---------- Fecha y cuenta colapsadas ---------- */
-.contexto {
-  width: 100%; min-height: var(--tap);
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin-top: 16px; padding: 0 16px;
-  background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--r-ctrl); color: var(--text);
-  font-size: 15px; font-weight: 500; cursor: pointer; text-align: left;
-}
-.contexto-flecha { color: var(--muted); transition: transform .15s; }
-.contexto[aria-expanded="true"] .contexto-flecha { transform: rotate(180deg); }
-.contexto-panel { margin-top: 8px; }
-.contexto-panel .seccion-label:first-child { margin-top: 0; }
-.fecha-custom { margin-top: 10px; }
-
 /* ---------- Banners ---------- */
 .banner {
   display: flex; align-items: center; justify-content: space-between;
@@ -220,7 +208,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .banner-ligar { border-color: var(--ok); color: var(--ok-txt); }
 .banner-ligar button { border-color: var(--ok); color: var(--ok-txt); }
 
-.ligar-row { margin-top: 14px; }
 .link-btn {
   background: none; border: none; color: var(--accent);
   font-size: 15px; font-weight: 600; cursor: pointer;
@@ -262,11 +249,6 @@ button.secondary {
 }
 .gasto-item:active { background: var(--card-alto); }
 /* dentro de una tarjeta (últimos movimientos) van al ras, sin tarjeta propia */
-.ultimos-card .gasto-item {
-  background: none; border: none; border-bottom: 1px solid var(--border);
-  border-radius: 0; margin-bottom: 0; padding: 10px 0;
-}
-.ultimos-card .gasto-item:last-child { border-bottom: none; }
 
 .gasto-ico {
   font-size: 18px; background: var(--card-alto); border-radius: 50%;
@@ -321,7 +303,7 @@ button.secondary {
 .stat { flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-ctrl); padding: 12px; }
 .stat-label { font-size: 12px; color: var(--muted); font-weight: 600; }
 /* el monto no se trunca: la moneda va en el título de la sección, no en cada número */
-.stat-valor { font-size: 20px; font-weight: 700; margin-top: 4px; letter-spacing: -.01em; }
+.stat-valor { font-size: 20px; font-weight: 700; margin-top: 4px; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-valor.gasto { color: var(--danger-txt); }
 .stat-valor.ingreso { color: var(--ok-txt); }
 
@@ -378,6 +360,8 @@ button.secondary {
 .saldo-row:active { opacity: .7; }
 .saldo-row b.pos { color: var(--text); font-weight: 700; }
 .saldo-row b.neg { color: var(--danger-txt); font-weight: 700; }
+.saldo-row b.sin-ajustar { color: var(--accent); font-weight: 600; font-size: 13px; }
+.icon-btn:disabled { opacity: .3; cursor: default; }
 
 .tendencia-svg { width: 100%; height: auto; display: block; }
 .tbar { fill: var(--border-fuerte); }
@@ -418,17 +402,35 @@ button.secondary {
 .prestamo-card.devuelto { opacity: .55; }
 .prestamo-card.devuelto .prestamo-nombre { text-decoration: line-through; }
 .prestamo-card.devuelto .prestamo-monto .m { color: var(--ok-txt); }
+.prestamo-card.sigue { border-color: var(--accent); }
+.prestamo-sigue {
+  width: 100%; min-height: 44px; margin-top: 12px;
+  background: none; border: 1px dashed var(--border-fuerte); border-radius: var(--r-ctrl);
+  color: var(--muted); font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.prestamo-sigue.on { background: var(--accent); border: 1px solid var(--accent); color: var(--sobre-accent); }
+.revision-ayuda { font-size: 14px; color: var(--muted); line-height: 1.5; margin: 4px 0 12px; }
+.revision-ayuda b { color: var(--text); }
+.revision-acciones {
+  position: sticky; bottom: calc(var(--alto-tabs) + env(safe-area-inset-bottom) + 8px);
+  display: flex; gap: 8px; padding: 8px 0; background: var(--bg);
+}
+.revision-acciones .primary { flex: 1; }
+.saldados summary { cursor: pointer; margin-top: 20px; list-style: none; }
+.saldados summary::before { content: '▸ '; }
+.saldados[open] summary::before { content: '▾ '; }
 
 /* ---------- Navegación y guardar ---------- */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 15;
+  height: calc(var(--alto-tabs) + env(safe-area-inset-bottom));
   display: flex; justify-content: center;
   padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
   background: var(--bg); border-top: 1px solid var(--border);
 }
 .tab-btn {
   flex: 1; max-width: 120px;
-  min-height: 56px; padding: 6px 2px;
+  min-height: 50px; padding: 6px 2px;
   border: none; background: none; color: var(--tenue);
   font-size: 12px; font-weight: 600; cursor: pointer;
   display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -436,15 +438,108 @@ button.secondary {
 .tab-ico { font-size: 22px; line-height: 1; }
 .tab-btn.active { color: var(--accent); }
 
-.barra-guardar {
-  position: fixed; left: 0; right: 0;
-  bottom: calc(68px + env(safe-area-inset-bottom));
-  z-index: 14; max-width: 480px; margin: 0 auto;
-  padding: 8px 16px 10px;
-  background: var(--bg); border-top: 1px solid var(--border);
+/* ---------- Cargar en una sola pantalla ----------
+   La vista mide exactamente lo que queda entre el header y las pestañas. Arriba el
+   cuerpo (lo único que cambia), abajo el pie con la fecha y Guardar, en el flujo y no
+   flotando: no se mueve al abrir el teclado ni al desplegar categorías. Si un celu muy
+   chico no alcanza, scrollea solo el cuerpo y el pie sigue en su lugar. */
+body.vista-cargar { padding-bottom: 0; }
+#view-cargar.active {
+  display: flex; flex-direction: column;
+  height: calc(100vh - var(--alto-header) - var(--alto-tabs) - env(safe-area-inset-bottom));
+  height: calc(100dvh - var(--alto-header) - var(--alto-tabs) - env(safe-area-inset-bottom));
 }
-body:not(.vista-cargar) .barra-guardar { display: none; }
-body.vista-cargar { padding-bottom: calc(170px + env(safe-area-inset-bottom)); }
+.cargar-cuerpo {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 10px; padding: 2px 0 6px;
+}
+.cargar-pie {
+  flex-shrink: 0; display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 0 8px; border-top: 1px solid var(--border);
+}
+.cargar-pie button.primary { min-height: 48px; padding: 10px; font-size: 16px; }
+
+#view-cargar .seccion-label { margin: 0 0 6px; font-size: 11px; letter-spacing: .05em; }
+#view-cargar .tipo-toggle { margin-bottom: 0; padding: 3px; }
+#view-cargar .tipo-btn { height: 36px; font-size: 14px; }
+#view-cargar .banner { margin-bottom: 0; padding: 6px 10px; font-size: 13px; }
+#view-cargar .banner button { min-height: 34px; padding: 0 10px; }
+#view-cargar .card { margin-bottom: 0; }
+#view-cargar input:not([type="date"]) { min-height: 42px; padding: 8px 12px; }
+
+.monto-card { padding: 6px 12px 10px; }
+.monto-label { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+#view-cargar .monto-row input {
+  font-size: 34px; min-height: 46px; padding: 0 0 2px;
+  border-bottom: 1.5px dashed var(--border-fuerte); border-radius: 0;
+}
+#view-cargar .monto-row input:focus { border-bottom: 1.5px solid var(--accent); }
+#view-cargar .moneda-sel { min-height: 38px; padding: 4px 8px; font-size: 14px; }
+.medio-btn {
+  flex: 0 0 auto; min-height: 38px; padding: 0 10px;
+  background: var(--card-alto); border: 1.5px solid var(--border-fuerte); border-radius: var(--r-ctrl);
+  color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+#view-cargar .ops { margin-top: 8px; }
+#view-cargar .ops button { height: 36px; font-size: 17px; }
+#view-cargar .calc-hint, #view-cargar .tasa-hint { min-height: 0; margin-top: 4px; }
+#view-cargar .calc-hint:empty, #view-cargar .tasa-hint:empty { display: none; }
+
+#bloqueCategoria, #bloqueDetalle, #bloquePrestamo, #bloqueTransferencia { display: flex; flex-direction: column; gap: 8px; }
+#bloqueCategoria .seccion-label, #bloqueDetalle .seccion-label, #bloqueTransferencia .seccion-label { margin: 0; }
+.cat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.cat-tile {
+  height: 58px; padding: 3px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--r-ctrl);
+  color: var(--text); font-size: 11.5px; font-weight: 500; line-height: 1.15; text-align: center; cursor: pointer;
+}
+.cat-tile .ico { font-size: 20px; line-height: 1; }
+.cat-tile .nom { overflow-wrap: anywhere; }
+.cat-tile.active { background: var(--accent); border-color: var(--accent); color: var(--sobre-accent); font-weight: 600; }
+#view-cargar .chip { min-height: 38px; padding: 0 12px; font-size: 13.5px; }
+.chip.marcada { border-color: var(--accent); color: var(--accent); }
+.chip-elegida .flecha { font-size: 11px; margin-left: 2px; }
+.chip-row.una-linea { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.chip-row.una-linea::-webkit-scrollbar { display: none; }
+.chip-row.una-linea .chip { flex-shrink: 0; }
+#view-cargar .notas-chips { margin: 0; }
+#bloqueDetalle.modo-prestamo > .seccion-label, #bloqueDetalle.modo-prestamo > .notas-chips { display: none; }
+.destino-row { display: flex; gap: 8px; }
+
+.fecha-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+#view-cargar .fecha-row .chip { min-height: 34px; padding: 0 10px; font-size: 13px; flex-shrink: 0; }
+.chip-fecha { position: relative; overflow: hidden; }
+/* el input de fecha cubre todo el chip, invisible: el toque cae en el control nativo */
+.chip-fecha input {
+  position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0;
+  margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; font-size: 16px;
+}
+.chip-fecha input::-webkit-calendar-picker-indicator {
+  position: absolute; inset: 0; width: auto; height: auto; margin: 0; padding: 0; cursor: pointer;
+}
+.fecha-hint {
+  margin-left: auto; min-width: 0; font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.ultimo-linea { display: flex; align-items: center; gap: 6px; min-height: 30px; }
+.ultimo-btn {
+  flex: 1; min-width: 0; min-height: 30px; padding: 2px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: none; border: none; color: var(--muted); font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.ultimo-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ultimo-btn b { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+.ultimo-btn b.gasto { color: var(--danger-txt); }
+.ultimo-btn b.ingreso { color: var(--ok-txt); }
+.ultimo-btn b.transferencia { color: var(--accent); }
+.ultimo-vacio { font-size: 12.5px; color: var(--muted); }
+.ligar-mini {
+  flex-shrink: 0; min-height: 30px; padding: 0 10px;
+  background: none; border: 1px solid var(--ok); border-radius: 999px;
+  color: var(--ok-txt); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
 
 /* ---------- Overlays ---------- */
 .overlay {
@@ -481,7 +576,11 @@ body.vista-cargar { padding-bottom: calc(170px + env(safe-area-inset-bottom)); }
   display: flex; align-items: center; gap: 10px;
 }
 .toast.show { opacity: 1; }
-body.vista-cargar .toast { bottom: calc(148px + env(safe-area-inset-bottom)); }
+/* Arriba, sobre el header: abajo tapaba los chips de fecha y, ya invisible, se comía los
+   toques ("Antes de ayer" y 📅 no respondían); además quedaba bajo el teclado. Nunca
+   atrapa toques: solo su botón (Deshacer) los recibe, y solo mientras se ve. */
+.toast { top: calc(env(safe-area-inset-top) + 6px); bottom: auto; pointer-events: none; }
+.toast.show button { pointer-events: auto; }
 .toast button {
   background: var(--accent); color: var(--sobre-accent); border: none;
   border-radius: 10px; min-height: 40px; padding: 0 14px;
@@ -502,7 +601,7 @@ body.vista-cargar .toast { bottom: calc(148px + env(safe-area-inset-bottom)); }
 
 .cat-chip.mas-cats { color: var(--accent); border-style: dashed; }
 
-.fecha-hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.fecha-hint { font-size: 12px; color: var(--muted); }
 .fecha-hint::first-letter { text-transform: uppercase; }
 
 /* Diagnóstico: para poder sacarle una foto y mandarla, en vez de adivinar qué pasa */
@@ -518,3 +617,22 @@ body.vista-cargar .toast { bottom: calc(148px + env(safe-area-inset-bottom)); }
   white-space: pre-wrap; word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* Celulares de pantalla baja (360×640 y parecidos): fichas y separaciones más chicas para
+   que cada estado de Cargar siga entrando sin scroll. */
+@media (max-height: 680px) {
+  .cat-tile { height: 50px; }
+  .cat-tile .ico { font-size: 17px; }
+  .cargar-cuerpo { gap: 7px; }
+  #bloqueCategoria, #bloqueDetalle, #bloquePrestamo, #bloqueTransferencia { gap: 6px; }
+  #view-cargar .chip { min-height: 34px; }
+  #view-cargar input:not([type="date"]) { min-height: 38px; }
+  #view-cargar .monto-row input { font-size: 30px; min-height: 40px; }
+  #view-cargar .ops button { height: 32px; }
+  #view-cargar .tipo-btn { height: 32px; }
+  .cargar-pie button.primary { min-height: 44px; }
+}
+#view-cargar .banner { flex-wrap: nowrap; }
+#view-cargar .banner > span:first-child { white-space: nowrap; }
+#view-cargar .monto-row input.largo { font-size: 26px; }
+#view-cargar .monto-row input.muy-largo { font-size: 21px; }
