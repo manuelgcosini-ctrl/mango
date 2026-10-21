@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mango-shell-v17';
+const CACHE_NAME = 'mango-shell-v18';
 const SHELL_FILES = [
   './',
   './index.html',

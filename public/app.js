@@ -1,4 +1,4 @@
-const VERSION = 'v17';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v18';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -343,8 +343,8 @@ function claveGrupo(m) { return m.grupo || m.id; }
 
 // ---------- Qué es gasto de verdad y qué no ----------
 // Cambiar AUD a euros no es gastar: la plata sigue siendo tuya. Comprar un ETF
-// tampoco. Prestarle a alguien tampoco, si vuelve. Los tres salían contados como
-// gasto del mes y lo inflaban; ahora tienen su propia línea en el Resumen.
+// tampoco. Esos dos van en su propia línea del Resumen. Los préstamos sí cuentan como
+// gasto (ver esConsumo), pero se clasifican aparte para que Prestado los encuentre.
 const RE_CAMBIO = /cambio de moneda|aud to eur|eur to aud|\d+\s*eur(os)?\b|\beuros\b/i;
 const RE_PRESTAMO = /^\s*pr[eé]stamo\b|^\s*presto\b|\bdeuda\b|le prest[eé]/i;
 
@@ -367,7 +367,10 @@ function claseMovimiento(m) {
   if (m.subcategoria === 'Préstamos' || RE_PRESTAMO.test(texto)) return 'prestamo';
   return 'consumo';
 }
-const esConsumo = (m) => claseMovimiento(m) === 'consumo';
+// Un préstamo cuenta como gasto: Manu prefiere anotarlo como plata que ya no está, porque
+// nunca se sabe si vuelve (decisión del 21/10/2026). Si vuelve, entra como ingreso, así
+// que no se cuenta dos veces. Prestado los sigue igual, aparte.
+const esConsumo = (m) => { const c = claseMovimiento(m); return c === 'consumo' || c === 'prestamo'; };
 function esPrestamo(m) { return claseMovimiento(m) === 'prestamo'; }
 
 // "Préstamo Andrea" -> "Andrea". Si no hay nombre, queda la nota entera.
@@ -2033,7 +2036,7 @@ function renderTotales(lista) {
   $('totales').innerHTML = Object.entries(porMoneda).map(([moneda, t]) =>
     `<div class="total-chip">💸 <b class="gasto">${fmt(t.gasto, moneda)}</b></div>
      <div class="total-chip">💰 <b class="ingreso">${fmt(t.ingreso, moneda)}</b></div>` +
-    (t.otro ? `<div class="total-chip" title="Préstamos, inversiones y cambios de moneda: salieron, pero no son gasto">↪ <b>${fmt(t.otro, moneda)}</b> no es gasto</div>` : '')
+    (t.otro ? `<div class="total-chip" title="Inversiones y cambios de moneda entre tus cuentas: salieron, pero no son gasto">↪ <b>${fmt(t.otro, moneda)}</b> no es gasto</div>` : '')
   ).join('') || '';
 }
 
@@ -2282,7 +2285,7 @@ function renderResumenMes() {
     const monto = Number(m.monto) || 0;
     if (m.tipo === 'Ingreso') { p.ingreso += monto; return; }
     const clase = claseMovimiento(m);
-    if (clase === 'consumo') p.gasto += monto;
+    if (clase === 'consumo' || clase === 'prestamo') p.gasto += monto;
     else if (p[clase] !== undefined) p[clase] += monto;
   });
 
@@ -2418,7 +2421,6 @@ function renderNoComputado(porMoneda, monedas) {
     const p = porMoneda[moneda];
     if (p.inversion > 0) filas.push(['📈', 'Invertido', 'ETF, cripto, acciones', p.inversion, moneda]);
     if (p.cambio > 0) filas.push(['💱', 'Cambiado de moneda', 'sigue siendo tuyo, en otro bolsillo', p.cambio, moneda]);
-    if (p.prestamo > 0) filas.push(['🤝', 'Prestado', 'lo seguís en la pestaña Prestado', p.prestamo, moneda]);
   });
   if (!filas.length) { $('noComputado').innerHTML = ''; return; }
   $('noComputado').innerHTML = `
