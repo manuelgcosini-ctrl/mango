@@ -1,4 +1,4 @@
-const VERSION = 'v18';   // tiene que coincidir con CACHE_NAME en sw.js
+const VERSION = 'v19';   // tiene que coincidir con CACHE_NAME en sw.js
 const LS_API_URL = 'mango_api_url';
 const LS_TOKEN = 'mango_token';
 const LS_QUEUE = 'mango_cola_pendiente';        // operaciones que todavía no llegaron a la planilla
@@ -391,6 +391,10 @@ function iniciales(nombre) {
 const RE_NOTA_PRESTAMO = /^\s*(?:pr[eé]stamo|presto|le prest[eé])\b/i;
 const claveDevuelto = (id) => `devuelto_${id}`;
 const estaDevuelto = (m) => !!config[claveDevuelto(m.id)];
+// Devolución parcial: devueltoParcial_<id> = cuánto ya volvió (por ejemplo, parte en
+// efectivo). Prestado muestra lo que falta; el préstamo sigue pendiente hasta saldarlo.
+const devueltoParcial = (m) => Math.max(0, Number(config[`devueltoParcial_${m.id}`]) || 0);
+const faltaDevolver = (m) => Math.max(0, (Number(m.monto) || 0) - devueltoParcial(m));
 
 // ---------- Red ----------
 // La planilla respondió, pero con un error (token mal, acción desconocida…). No es cuestión de señal.
@@ -2527,7 +2531,7 @@ function renderPrestado() {
   if (!activos.length) revisandoPrestamos = false;
 
   const porMoneda = {};
-  activos.forEach(m => { porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + (Number(m.monto) || 0); });
+  activos.forEach(m => { porMoneda[m.moneda] = (porMoneda[m.moneda] || 0) + faltaDevolver(m); });
   const monedas = Object.entries(porMoneda).sort((a, b) => b[1] - a[1]);
 
   $('prestadoTotales').innerHTML = monedas.length
@@ -2562,7 +2566,8 @@ function htmlPrestamo(m, modo) {
   const saldado = modo === 'saldado';
   const cuando = saldado
     ? (fechaSaldado(m) ? `Saldado el ${fechaCorta(fechaSaldado(m))}` : 'Saldado')
-    : `Prestado el ${fechaCorta(soloFecha(m.fecha))}`;
+    : `Prestado el ${fechaCorta(soloFecha(m.fecha))}` +
+      (devueltoParcial(m) ? ` · ya devolvió ${fmt(devueltoParcial(m))} de ${fmt(m.monto)}` : '');
   const accion = modo === 'revision'
     ? `<button type="button" class="prestamo-sigue${sigueDebiendo.has(m.id) ? ' on' : ''}" data-sigue="${esc(m.id)}" aria-pressed="${sigueDebiendo.has(m.id)}">${sigueDebiendo.has(m.id) ? '☑' : '☐'} Todavía me debe</button>`
     : `<button type="button" class="prestamo-saldar" data-saldar="${esc(m.id)}">${saldado ? 'Volver a pendiente' : 'Marcar como saldado ✓'}</button>`;
@@ -2575,7 +2580,7 @@ function htmlPrestamo(m, modo) {
           <div class="prestamo-fecha">${esc(cuando)} · ${esc(m.medioPago || '')}</div>
         </div>
         <div class="prestamo-monto">
-          <div class="m">${fmt(m.monto)}</div>
+          <div class="m">${fmt(saldado ? m.monto : faltaDevolver(m))}</div>
           <div class="c">${esc(m.moneda)}</div>
         </div>
       </div>
